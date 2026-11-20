@@ -74,7 +74,7 @@ def run_job(args,client,job):
         argument_error=validate(arguments,catalog[action][1])
         if structured and action in ('review_group_plan','revise_group_plan','execute_group_plan','read_group_plan'):
             arguments.update(plan_id=context['current_plan_id'],expected_plan_hash=context['current_plan_hash'])
-        if action in ('record_finding','configure_local_rate','offer_group_plan','revise_group_plan','review_group_plan','execute_group_plan','publish_resource_snapshot','calculate_link_options','finish'):
+        if action in ('record_finding','configure_local_rate','offer_group_plan','revise_group_plan','review_group_plan','execute_group_plan','publish_resource_snapshot','calculate_link_options','finish') or structured and action in ('request_peer_resources','wait_for_collaboration'):
             arguments['observation_id']=lastobs
         if action in ('read_peer_events','wait_peer_event','wait_for_collaboration') and 'after_sequence' not in arguments:arguments['after_sequence']=cursor
         ev.add('framework_identity_binding',node,{'model_arguments':value['arguments'],'effective_arguments':arguments,'business_values_rewritten':False})

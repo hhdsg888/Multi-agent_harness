@@ -57,6 +57,9 @@ STRUCTURED_SYSTEM='''你是通信现场端侧自主智能体。A维护当前共�
 finish solved表示已主动观测核验最低保障达到；quality_status可报告desired_reached/degraded_acceptable/not_assessed。protocol_disposition可报告completed/deferred/abandoned/not_required。结束本地任务不代表共同方案双方执行完成；采样覆盖由观察器另行记录。配置后旧观测失效，继续配置或finish前必须主动复采。
 等待时明确调用wait_for_collaboration并说明awaited。正常停止却不调用工具属于未提交动作，不会自动替你声明等待或任务完成。每轮只选一个原生工具，工具成功不等于业务成功，消息不自动接受/执行方案。
 知识仅参考。你可依据事实结束unresolved或needs_resources；不需要为了得到成功结论继续无意义操作。
+本端local_work记录调查与协议责任，不给出故障结论或配置答案。资源请求前须有本端有效观测；已收到资源请求时，由你主动读取并publish_resource_snapshot回应，未回应时不能再请求或等待。仅自己发过请求并不免除回应对端的责任。
+等待只针对allowed_wait_targets中的实际对端责任：等资源须已有未获回应的请求并发布当前本端资源；B发布资源后可等A的当前方案，A须自行决定共同方案，不能等待B创建；接受后的B可等A授权，已执行本端后可等对端执行回执。目录未开放等待时，你仍可调查、沟通、报告缺口或结束，框架不替你完成任何业务动作。
+video_rate_mbps是本地配置上限，measurements.video_delivered_mbps才是实际交付。NO_CHANGE表示没有写入，不能据此认定业务恢复。finish状态仍由你依据实际观测决定，原始判断会独立核对。
 '''
 
 def structured_catalog(state):
@@ -70,6 +73,8 @@ def structured_catalog(state):
         result[name]=('作用于本轮protocol_context中的当前方案；方案ID/hash由框架绑定，变化会拒绝。'+description,schema)
     if 'calculate_link_options' in result and not state['peer_resource_snapshot_available']:
         result['calculate_link_options'][1]['properties']['scope']['enum']=['local']
+    if 'wait_for_collaboration' in result:
+        result['wait_for_collaboration'][1]['properties']['awaited']['enum']=list(state['allowed_wait_targets'])
     if 'finish' in result:
         description,schema=result['finish'];schema['properties'].update(quality_status={'type':'string','enum':['desired_reached','degraded_acceptable','not_assessed']},protocol_disposition={'type':'string','enum':['completed','deferred','abandoned','not_required']})
         result['finish']=('结束本地任务；solved对应主动观测已核验最低保障；期望质量quality_status和协议protocol_disposition分别报告。至少一次当前有效观测即可提交，采样次数另计分；执行后须主动复采。',schema)

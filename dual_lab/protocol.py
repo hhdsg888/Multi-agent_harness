@@ -19,13 +19,47 @@ class StructuredProtocol:
     def pending_requests(self):
         answered={ident for m in self.c['messages'] if m['sender']==self.n and m['kind']=='resource_snapshot' for ident in m['payload'].get('in_reply_to',[])}
         return [m['message_id'] for m in self.p.received(self.c,self.n) if m['kind']=='resource_request' and m['message_id'] not in answered]
+    def outgoing_requests(self):
+        answered={ident for m in self.p.received(self.c,self.n) if m['kind']=='resource_snapshot' for ident in m['payload'].get('in_reply_to',[])}
+        return [m['message_id'] for m in self.c['messages'] if m['sender']==self.n and m['kind']=='resource_request' and m['message_id'] not in answered]
+    def own_resources_published(self,observation):
+        if observation is None:return False
+        for message in reversed(self.c['messages']):
+            if message['sender']!=self.n or message['kind']!='resource_snapshot':continue
+            published=message['payload']['observation']
+            # Identical local resource versions can survive another sensor read.
+            # Do not inspect whether the peer has secretly fetched this message.
+            return time.time()-published['sampled_at']<=1800 and all(published[k]==observation[k] for k in ('config_version','environment_revision','ports','background_mbps'))
+        return False
+    def wait_options(self,observation,plan,owed,published,outgoing):
+        if observation is None or owed or self.c['partition']:return []
+        options=[]
+        if published and outgoing:options.append('peer_resources')
+        if plan is None:
+            if self.n=='B' and published:options.append('plan_update')
+            return options
+        if plan['authorized']:
+            if self.n in plan['applied'] and self.peer not in plan['applied']:options.append('execution_receipt')
+            return options
+        if not published:return options
+        if self.n=='A':
+            if plan['accepted'].get('B') is None:options.append('plan_update')
+        elif plan['accepted'].get('B') is False:options.append('plan_update')
+        elif plan['accepted'].get('B') is True:
+            try:self.p.check_ready(self.c,'B',plan);options.append('authorization')
+            except Fault:pass
+        return options
     def active(self):return self.c['plans'].get(self.c.get('active_plan_id'))
     def state(self,ident):
-        observation=self.fresh_observation(ident);plan=self.active();available=['read_sensor_adapter','retrieve_knowledge','send_peer_message','request_peer_resources','wait_for_collaboration','get_report_template','report_gap']
+        observation=self.fresh_observation(ident);plan=self.active();available=['read_sensor_adapter','retrieve_knowledge','get_report_template','report_gap']
+        owed=self.pending_requests();outgoing=self.outgoing_requests();published=self.own_resources_published(observation)
+        wait_options=self.wait_options(observation,plan,owed,published,outgoing)
         resource_available=False
         try:self.peer_observation();resource_available=True
         except Fault:pass
         channel_available=not self.c['partition']
+        if channel_available:available.append('send_peer_message')
+        if wait_options:available.append('wait_for_collaboration')
         # Shared protocol records can be synchronized over the working channel;
         # partitioned nodes receive only their previously known local ledger.
         public=None
@@ -36,7 +70,10 @@ class StructuredProtocol:
                 if plan['plan_id'] not in seen:seen.append(plan['plan_id']);self.p.save()
             available.append('read_group_plan')
         if observation:
-            available+=['finish','record_finding','publish_resource_snapshot','calculate_link_options']
+            available+=['finish','record_finding','calculate_link_options']
+            if channel_available:
+                available.append('publish_resource_snapshot')
+                if not owed and not outgoing:available.append('request_peer_resources')
             if not plan or set(plan['applied'])=={'A','B'}:available.append('configure_local_rate')
             if channel_available:
                 if self.n=='A' and resource_available:
@@ -44,9 +81,13 @@ class StructuredProtocol:
                     elif not plan['authorized']:available.append('revise_group_plan')
                 if plan and not plan['authorized']:available.append('review_group_plan')
                 if plan and self.n not in plan['applied'] and (plan['authorized'] or self.n=='A' and all(plan['accepted'].get(n) is True and n in plan['ready'] for n in ('A','B'))):available.append('execute_group_plan')
-        phase='observation_required' if not observation else 'execution_or_verification' if plan and plan['authorized'] else 'review_current_plan' if plan else 'planning' if resource_available and self.n=='A' else 'resource_exchange'
+        phase='observation_required' if not observation else 'resource_response_due' if owed else 'execution_or_verification' if plan and plan['authorized'] else 'review_current_plan' if plan else 'planning' if resource_available and self.n=='A' else 'resource_exchange'
         return {'node_id':self.n,'role':'coordinator' if self.n=='A' else 'resource_owner','phase':phase,'available_tools':available,
-                'local_observation_valid':observation is not None,'peer_resource_snapshot_available':resource_available,'pending_resource_request_ids':self.pending_requests(),
+                'local_observation_valid':observation is not None,'peer_resource_snapshot_available':resource_available,'pending_resource_request_ids':owed,
+                'outgoing_resource_request_ids':outgoing,'own_resource_snapshot_current':published,'allowed_wait_targets':wait_options,
+                'local_work':{'observation_required':observation is None,'resource_response_owed':bool(owed),'resource_publication_outdated':bool((owed or outgoing or plan) and not published),
+                              'current_plan_review_pending':bool(public and not plan['authorized'] and self.n not in plan['accepted']),
+                              'common_plan_owner':'A','peer_can_create_common_plan':self.n=='B'},
                 'current_plan_id':plan['plan_id'] if public else None,'current_plan_hash':plan['plan_hash'] if public else None,'current_plan':public,
                 'local_ledger':self.p.local_context(self.c,self.n),'channel_available':channel_available}
     def check_local(self,ob,fragment):
@@ -74,7 +115,7 @@ class StructuredProtocol:
         if name in ('offer_group_plan','revise_group_plan'):return self.propose(name,arg)
         if name=='review_group_plan':return self.review(arg)
         if name=='wait_for_collaboration':
-            require(arg['awaited'] in ('peer_resources','plan_update','authorization','execution_receipt'),'INVALID_ARGUMENTS','unknown awaited event')
+            require(arg['awaited'] in state['allowed_wait_targets'],'WAIT_DEPENDENCY_REQUIRED','wait target must be a real outstanding peer responsibility; local observation and owed resource replies come first')
             self.c.setdefault('waiting',{'A':None,'B':None})[self.n]={'after_sequence':arg['after_sequence'],'awaited':arg['awaited'],'plan_id':self.c.get('active_plan_id')}
             self.p.event('explicit_wait_requested',self.n,{'case_id':self.c['id'],**self.c['waiting'][self.n]})
             return {'ok':True,'result':{'wait_registered':True,'awaited':arg['awaited']}}
