@@ -34,7 +34,7 @@ class Plant:
         require(protocol_mode in ('legacy','structured'),'INVALID_POLICY','unknown protocol mode')
         require(type(event_reactivation) is bool,'INVALID_POLICY','event reactivation must be boolean')
         require(type(task_dispatch) is bool and (not task_dispatch or protocol_mode=='structured'),'INVALID_POLICY','task dispatch requires structured protocol')
-        require(task_revision in ('r11','r12'),'INVALID_POLICY','unknown task revision')
+        require(task_revision in ('r11','r12','r13'),'INVALID_POLICY','unknown task revision')
         if self.state['active']:
             prior=self.case(self.state['active']);require(self.case_complete(prior),'ACTIVE_CASE','previous case still active or has deliverable follow-up work')
         cid='group_'+uuid.uuid4().hex[:12]
@@ -78,7 +78,7 @@ class Plant:
         c['messages'].append(message);self.event('message_sent',n,message)
         if kind in ('plan_proposed','plan_response','plan_prepared','plan_prepare_failed','plan_authorized','execution_receipt','resource_snapshot','resource_request','collaboration_request'):self.activate_for_message(c,message['recipient'],message['message_id'])
         return clone(message)
-    def improved_tasks(self,c):return c.get('task_dispatch') and c.get('task_revision')=='r12'
+    def improved_tasks(self,c):return c.get('task_dispatch') and c.get('task_revision')in ('r12','r13')
     def pending_activation(self,c,node):
         if not self.improved_tasks(c) or c.get('forced_closed') or c['partition'] or not c.get('event_reactivation'):return None
         finished=c['finished'][node]
@@ -300,7 +300,7 @@ class Plant:
         with self.lock:
             op=data.get('op')
             if actor=='admin':
-                if op=='capabilities':return {'task_dispatch_revision':'r11','task_dispatch_revisions':['r11','r12'],'stable_public_tools':17,'task_context_binding':True,'post_execution_barrier':True}
+                if op=='capabilities':return {'task_dispatch_revision':'r11','task_dispatch_revisions':['r11','r12','r13'],'stable_public_tools':17,'task_context_binding':True,'post_execution_barrier':True}
                 if op=='begin_suite':
                     if self.state['active']:require(self.case_complete(self.case(self.state['active'])),'ACTIVE_CASE','previous suite still has live nodes or deliverable follow-up work')
                     self.state.update(suite_done=False,active=None,suite_name=data['name']);self.save();return {'started':data['name']}

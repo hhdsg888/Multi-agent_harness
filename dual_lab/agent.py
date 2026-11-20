@@ -6,7 +6,7 @@ from .adapter import NodeProviders as Providers
 from collab_lab.runtime import TaskLedger,RepetitionGuard
 from collab_lab.rag import RagLibrary
 from .client import Client
-from .catalog import CAT,SYSTEM,STRUCTURED_SYSTEM,stable_catalog,task_catalog,TASK_SYSTEM,TASK_SYSTEM_R12
+from .catalog import CAT,SYSTEM,STRUCTURED_SYSTEM,stable_catalog,task_catalog,ready_task_catalog,TASK_SYSTEM,TASK_SYSTEM_R12
 from .memory import WorkingMemory
 from .validation import validate,model_history
 
@@ -52,6 +52,7 @@ def run_job(args,client,job):
     structured=job.get('protocol_mode')=='structured'
     task_dispatch=structured and job.get('task_dispatch',False)
     improved=task_dispatch and job.get('task_revision')=='r12'
+    scoped=task_dispatch and revision=='r13'
     if structured:config['native_no_call_control']='no_action'
     provider=Providers(config);guard=RepetitionGuard(20)
     library=RagLibrary(args.root/'vendor/knowledge',strategy_pack=args.root/'vendor/strategies')
@@ -106,7 +107,7 @@ def run_job(args,client,job):
         if task_dispatch:
             if not context['task_dispatch']['current_task']:status='subtask_no_ready_task';break
             ev.add('subtask_dispatched_to_model',node,context['task_dispatch'])
-        catalog=task_catalog() if task_dispatch else stable_catalog() if structured else CAT
+        catalog=(ready_task_catalog(context) if scoped else task_catalog()) if task_dispatch else stable_catalog() if structured else CAT
         if structured:provider.config['tool_descriptions']={name:value[0] for name,value in catalog.items()}
         current_input={'protocol_context':context}
         if improved:

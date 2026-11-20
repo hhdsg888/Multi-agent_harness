@@ -103,6 +103,11 @@ def task_catalog():
     result['finish']=('依据本端实际观测结束任务，报告solved/unresolved/needs_resources；协议进度由真实回执账本记录。无法完成核验时可明确提交unresolved/needs_resources，原判断原样保留。',obj({'status':{'type':'string','enum':['solved','unresolved','needs_resources']}}))
     return result
 
+def ready_task_catalog(context):
+    """Expose the current protocol tools with their original public schemas."""
+    available = set(context['available_tools'])
+    return {name: definition for name, definition in task_catalog().items() if name in available}
+
 TASK_SYSTEM='''你是通信现场端侧自主智能体，主动观察、分析、选择配置、执行和核验。A维护唯一当前共同方案及修订链，B可主动发起协作、建议修改、独立接受或拒绝；两端均只控制自己的执行器。
 protocol_context.task_dispatch.current_task是调度器依据本端协议记录分派的当前子任务，包含依赖、完成凭据和重点工具。它不含业务答案。优先处理该职责，仍由你选择工具、业务参数、接受/拒绝及业务结束状态；你可明确报告无法完成。focus_tools仅提示重点，公开17工具名和参数契约在本轮保持稳定。
 只有read_sensor_adapter是主动现场观测；protocol_context、working_memory和共享计划是协议或历史记录，不是新的测量。历史观测不自动绑定当前写入；配置后须主动复采。不得把video_rate_mbps配置上限当成measurements.video_delivered_mbps实际交付。
