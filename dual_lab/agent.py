@@ -48,6 +48,10 @@ def run_job(args,client,job):
         inbox=client.call({'op':'tool',**base,'name':'read_peer_events','arguments':{'after_sequence':cursor},'request_id':request_prefix+':inbox:'+str(step)})
         if inbox.get('ok') and inbox['result']['messages']:
             rows=inbox['result']['messages'];cursor=inbox['result']['cursor']
+            source=next((m for m in rows if m['message_id']==(job.get('activation_source') or {}).get('source_message_id')),None)
+            if source:
+                initial['new_event_task']={'source_message_id':source['message_id'],'message_kind':source['kind'],'sender':source['sender'],'responsibility':{'resource_request':'评估并回应对端提出的本端资源请求；本端资源由你自行主动观测并决定发布或说明无法回应。','resource_snapshot':'处理实际到达的对端资源回执，结合本端观测自主决定后续协作。','plan_proposed':'审议对端实际提出的当前方案，自主接受准备或拒绝。'}.get(source['kind'],'处理新的对端协议事件，核对本端职责后自主决定动作。'),'prior_runtime_end_is_not_completion':True}
+                messages[1]['content']=json.dumps(initial,ensure_ascii=False)
             ev.add('peer_messages_delivered_to_model',node,{'message_ids':[x['message_id'] for x in rows],'messages':rows})
             messages.append({'role':'user','content':json.dumps({'peer_events':rows},ensure_ascii=False)})
         # Retain original goal plus a bounded recent history; full raw calls remain on disk.

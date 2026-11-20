@@ -28,10 +28,11 @@ class Plant:
         self.db.execute("INSERT OR REPLACE INTO state VALUES('plant',?)",(json.dumps(self.state),));self.db.commit()
     def event(self,kind,actor,data):
         self.db.execute('INSERT INTO events(kind,actor,body) VALUES(?,?,?)',(kind,actor,json.dumps({'time':time.time(),**data},ensure_ascii=False)))
-    def create(self,label,change_policy='after_samples',protocol_mode='legacy'):
+    def create(self,label,change_policy='after_samples',protocol_mode='legacy',event_reactivation=False):
         require(label in CASES,'UNKNOWN_CASE','unknown fixture')
         require(change_policy in ('after_samples','at_start'),'INVALID_POLICY','unknown change policy')
         require(protocol_mode in ('legacy','structured'),'INVALID_POLICY','unknown protocol mode')
+        require(type(event_reactivation) is bool,'INVALID_POLICY','event reactivation must be boolean')
         if self.state['active']:
             prior=self.case(self.state['active']);require(all(prior['finished'].values()),'ACTIVE_CASE','previous case still active')
         cid='group_'+uuid.uuid4().hex[:12]
@@ -39,7 +40,7 @@ class Plant:
                  'selected_path':'primary','video_rate_mbps':5.,'background_mbps':0.,
                  'ports':{'primary':{'physical_up':True,'enabled':True,'channel':'c1','capacity_mbps':8.},
                           'backup':{'physical_up':True,'enabled':False,'channel':'c2','capacity_mbps':6.}}} for n in ('A','B')}
-        case={'id':cid,'fixture':label,'protocol_mode':protocol_mode,'active_plan_id':None,'change_policy':change_policy,'minimum_samples':2 if change_policy=='at_start' else 4,'nodes':nodes,'observations':{},'messages':[],
+        case={'id':cid,'fixture':label,'protocol_mode':protocol_mode,'event_reactivation':event_reactivation,'active_plan_id':None,'change_policy':change_policy,'minimum_samples':2 if change_policy=='at_start' else 4,'nodes':nodes,'observations':{},'messages':[],
               'plans':{},'finished':{'A':None,'B':None},'changed':False,'stale_injected':False,
               'partition':False,'created':time.time(),'findings':[],'executions':[],'boots':{},'peer_delivery':[],
               'activations':{'A':1,'B':1},'node_history':{'A':[],'B':[]},'decisions':{'A':0,'B':0},'delivered':{'A':0,'B':0}}
@@ -77,9 +78,20 @@ class Plant:
         return clone(message)
     def activate_for_message(self,c,target,message_id):
         finished=c['finished'][target]
-        if finished and 'model_submission' in finished and c['decisions'][target]<64 and time.time()-c['created']<3600:
+        recoverable=finished and c.get('event_reactivation') and finished.get('runtime_status') in ('model_no_action','wait_deadlock','wait_timeout')
+        if finished and ('model_submission' in finished or recoverable) and c['decisions'][target]<64 and time.time()-c['created']<3600:
+            source=next((m for m in c['messages'] if m['message_id']==message_id and m['recipient']==target and m['kind']!='agent_message'),None)
+            if c.get('event_reactivation'):
+                claimed=c.setdefault('activation_message_ids',{'A':[],'B':[]})[target]
+                if not source or message_id in claimed or message_id in c.get('received_message_ids',{}).get(target,[]):return
+                claimed.append(message_id)
+                c.setdefault('activation_sources',{})[target]={'source_message_id':message_id,'message_kind':source['kind'],'sender':source['sender']}
+                if c.get('waiting'):c['waiting'][target]=None
             c['node_history'][target].append(clone(finished));c['finished'][target]=None;c['activations'][target]+=1
             self.event('peer_task_enqueued',target,{'case_id':c['id'],'activation':c['activations'][target],'source_message_id':message_id})
+    def unread_control_messages(self,c,node):
+        received=set(c.get('received_message_ids',{}).get(node,[]))
+        return [m for m in c['messages'] if m['recipient']==node and m['kind']!='agent_message' and m['message_id'] not in received]
     def obs(self,c,n,ident,allow_prior_activation=False):
         ob=c['observations'].get(ident)
         require(ob and ob['node_id']==n,'OBSERVATION_REQUIRED','reference a real local observation')
@@ -260,7 +272,7 @@ class Plant:
             if c.get('protocol_mode')!='structured':require(enough,'OBSERVATION_WINDOW','required active observation window has not completed')
             require(arg['status'] in ('solved','unresolved','needs_resources'),'INVALID_ARGUMENTS','unknown finish status')
             c['finished'][n]={'model_submission':clone(arg),'measurements':self.measure(c),'finished_at':time.time()}
-            pending=[m for m in c['messages'] if m['recipient']==n and m['sequence']>c['delivered'][n] and m['kind']!='agent_message']
+            pending=self.unread_control_messages(c,n) if c.get('event_reactivation') else [m for m in c['messages'] if m['recipient']==n and m['sequence']>c['delivered'][n] and m['kind']!='agent_message']
             if pending:self.activate_for_message(c,n,pending[0]['message_id'])
             return {'local_task_ended':True,'model_status':arg['status']}
         raise Fault('UNKNOWN_TOOL',name)
@@ -272,7 +284,7 @@ class Plant:
                     if self.state['active']:require(all(self.case(self.state['active'])['finished'].values()),'ACTIVE_CASE','previous suite still has live nodes')
                     self.state.update(suite_done=False,active=None,suite_name=data['name']);self.save();return {'started':data['name']}
                 if op=='suite_end':self.state['suite_done']=True;self.save();return {'stopped':True}
-                if op=='create':return {'case_id':self.create(data['fixture'],data.get('change_policy','after_samples'),data.get('protocol_mode','legacy'))}
+                if op=='create':return {'case_id':self.create(data['fixture'],data.get('change_policy','after_samples'),data.get('protocol_mode','legacy'),data.get('event_reactivation',False))}
                 if op=='snapshot':return clone(self.case(data['case_id']))
                 if op=='force_end':
                     c=self.case(data['case_id'])
@@ -292,7 +304,8 @@ class Plant:
                 if c['finished'][actor]:return {'job':None}
                 goal={**GOAL,'observation_window_per_node':c.get('minimum_samples',4)}
                 if c.get('protocol_mode')=='structured':goal={**goal,'observation_window_per_node':1,'completion_semantics':'solved means verified minimum service floor; desired quality and protocol completion are separate','voice_satisfaction_definition':'voice_delivered_mbps / voice_demand_mbps'}
-                return {'job':{'group_task_id':cid,'node_id':actor,'goal':goal,'cloud_available':False,'protocol_mode':c.get('protocol_mode','legacy'),'activation':c.get('activations',{}).get(actor,1),'remaining_decisions':64-c.get('decisions',{}).get(actor,0),'remaining_seconds':max(0,3600-(time.time()-c['created']))}}
+                source=c.get('activation_sources',{}).get(actor)
+                return {'job':{'group_task_id':cid,'node_id':actor,'goal':goal,'cloud_available':False,'protocol_mode':c.get('protocol_mode','legacy'),'activation':c.get('activations',{}).get(actor,1),'activation_source':{'source_message_id':source['source_message_id']} if source else None,'remaining_decisions':64-c.get('decisions',{}).get(actor,0),'remaining_seconds':max(0,3600-(time.time()-c['created']))}}
             c=self.case(data['case_id'])
             if op=='register':
                 boot=data['boot_id'];prior=c['boots'].get(actor)
@@ -326,7 +339,13 @@ class Plant:
             if op=='trace':
                 c['decisions'][actor]+=1
                 self.event('model_turn',actor,{k:v for k,v in data.items() if k not in ('op','boot_id')});self.save();return {'recorded':True}
-            if op=='runtime_end':c['finished'][actor]={'runtime_status':data['reason']};self.save();return {'ended':True}
+            if op=='runtime_end':
+                c['finished'][actor]={'runtime_status':data['reason']}
+                if c.get('event_reactivation'):
+                    c['finished'][actor]['ended_at']=time.time()
+                    pending=self.unread_control_messages(c,actor)
+                    if pending:self.activate_for_message(c,actor,pending[0]['message_id'])
+                self.save();return {'ended':True}
             if op=='request_status':
                 row=self.db.execute('SELECT result FROM requests WHERE id=?',(actor+':'+data['request_id'],)).fetchone();return {'status':'complete' if row else 'unknown','result':json.loads(row[0]) if row else None}
             require(op=='tool','UNKNOWN_OPERATION',str(op));require(not c['finished'][actor],'TASK_ENDED','local task already ended')
