@@ -103,10 +103,43 @@ def task_catalog():
     result['finish']=('依据本端实际观测结束任务，报告solved/unresolved/needs_resources；协议进度由真实回执账本记录。无法完成核验时可明确提交unresolved/needs_resources，原判断原样保留。',obj({'status':{'type':'string','enum':['solved','unresolved','needs_resources']}}))
     return result
 
-def ready_task_catalog(context):
+EXECUTION_DUTY_GUIDANCE = (
+    '当前职责是处理尚无本端执行回执的片段。依据本端观测、准备和授权，自主决定是否可以执行。'
+    '选择执行时，提交本端执行并以实际回执为准。不能执行时可调查或具体说明障碍。'
+    '对端已经执行、当前业务达标或口头确认都不能代替本端回执。')
+EXECUTION_DESCRIPTION = (
+    '仅当你依据当前本端观测和授权独立决定可以执行时，提交本端执行。'
+    '本工具不接收任何参数，调用对象必须是空对象 {}。'
+    '框架会按当前轮的方案和版本绑定身份；不要传入 plan_id、plan_hash、expected_plan_hash 或 observation_id。'
+    '实际执行以后以工具回执为准。')
+
+
+def measured_plan_options(rows):
+    return {
+        'basis': '当前本端采样与已收到的对端快照对应的原组级计算。',
+        'meaning': '区间为 null 表示该路径在这份观测中无法保障最低业务。'
+                   '若选择提案或修订，请自行选共同路径、信道与区间内的速率；也可以继续调查或决定退出。',
+        'paths': [{key: row[key] for key in ('path', 'video_rate_range_mbps', 'configurable_common_channels')}
+                  for row in rows],
+    }
+
+
+def current_measured_plan_options(sources, receipt):
+    if not sources or not receipt:
+        return None
+    receipt_ids = {node: source['observation_id'] for node, source in receipt['observation_sources'].items()}
+    if receipt_ids != sources:
+        return None
+    return measured_plan_options(receipt['options'])
+
+
+def ready_task_catalog(context, *, explicit_execution=False):
     """Expose the current protocol tools with their original public schemas."""
     available = set(context['available_tools'])
-    return {name: definition for name, definition in task_catalog().items() if name in available}
+    catalog = {name: definition for name, definition in task_catalog().items() if name in available}
+    if explicit_execution and 'execute_group_plan' in catalog:
+        catalog['execute_group_plan'] = (EXECUTION_DESCRIPTION, catalog['execute_group_plan'][1])
+    return catalog
 
 TASK_SYSTEM='''你是通信现场端侧自主智能体，主动观察、分析、选择配置、执行和核验。A维护唯一当前共同方案及修订链，B可主动发起协作、建议修改、独立接受或拒绝；两端均只控制自己的执行器。
 protocol_context.task_dispatch.current_task是调度器依据本端协议记录分派的当前子任务，包含依赖、完成凭据和重点工具。它不含业务答案。优先处理该职责，仍由你选择工具、业务参数、接受/拒绝及业务结束状态；你可明确报告无法完成。focus_tools仅提示重点，公开17工具名和参数契约在本轮保持稳定。

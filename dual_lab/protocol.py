@@ -54,9 +54,10 @@ class StructuredProtocol:
         observation=self.fresh_observation(ident);plan=self.active();available=['read_sensor_adapter','retrieve_knowledge','get_report_template','report_gap']
         owed=self.pending_requests();outgoing=self.outgoing_requests();published=self.own_resources_published(observation)
         wait_options=self.wait_options(observation,plan,owed,published,outgoing)
-        resource_available=False
-        try:self.peer_observation();resource_available=True
+        peer_observation=None
+        try:peer_observation=self.peer_observation()
         except Fault:pass
+        resource_available=peer_observation is not None
         channel_available=not self.c['partition']
         if channel_available:available.append('send_peer_message')
         if wait_options:available.append('wait_for_collaboration')
@@ -91,6 +92,10 @@ class StructuredProtocol:
                 'current_plan_id':plan['plan_id'] if public else None,'current_plan_hash':plan['plan_hash'] if public else None,'current_plan':public,
                 'local_ledger':self.p.local_context(self.c,self.n),'channel_available':channel_available}
         if self.c.get('task_dispatch'):
+            if (self.c.get('task_revision')=='r14' and observation and peer_observation
+                    and ('offer_group_plan' in available or 'revise_group_plan' in available)):
+                view['plan_calculation_sources'] = {self.n: observation['observation_id'],
+                                                    self.peer: peer_observation['observation_id']}
             from .tasks import TaskGraph
             prepared=False
             if plan and self.n in plan['ready']:

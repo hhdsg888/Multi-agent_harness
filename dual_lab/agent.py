@@ -6,7 +6,7 @@ from .adapter import NodeProviders as Providers
 from collab_lab.runtime import TaskLedger,RepetitionGuard
 from collab_lab.rag import RagLibrary
 from .client import Client
-from .catalog import CAT,SYSTEM,STRUCTURED_SYSTEM,stable_catalog,task_catalog,ready_task_catalog,TASK_SYSTEM,TASK_SYSTEM_R12
+from .catalog import CAT,SYSTEM,STRUCTURED_SYSTEM,stable_catalog,task_catalog,ready_task_catalog,TASK_SYSTEM,TASK_SYSTEM_R12,EXECUTION_DUTY_GUIDANCE,current_measured_plan_options
 from .memory import WorkingMemory
 from .validation import validate,model_history
 
@@ -51,8 +51,9 @@ def run_job(args,client,job):
     config={'models':{'edge':{'model':'gemma4-e2b:latest','base_url':args.model_url}},'edge_context':65536,'edge_output_tokens':16384,'edge_output_tokens_max':32768,'edge_length_retry':True,'edge_thinking':True,'edge_request_timeout_seconds':900,'request_timeout_seconds':180,'response_retry_attempts':1,'transport_retry_attempts':3,'transport_retry_delays':[1,3]}
     structured=job.get('protocol_mode')=='structured'
     task_dispatch=structured and job.get('task_dispatch',False)
-    improved=task_dispatch and job.get('task_revision')=='r12'
-    scoped=task_dispatch and revision=='r13'
+    revision=job.get('task_revision')
+    improved=task_dispatch and revision in ('r12','r13','r14')
+    scoped=task_dispatch and revision in ('r13','r14')
     if structured:config['native_no_call_control']='no_action'
     provider=Providers(config);guard=RepetitionGuard(20)
     library=RagLibrary(args.root/'vendor/knowledge',strategy_pack=args.root/'vendor/strategies')
@@ -65,6 +66,7 @@ def run_job(args,client,job):
         ev.add('working_memory_restored',node,{'path':str(memory.path),'sha256':initial['working_memory']['persistence_sha256'],'historical_only':True,'current_observation_bound':False})
     messages=[{'role':'system','content':instructions},{'role':'user','content':json.dumps(initial,ensure_ascii=False)}]
     cursor=0;lastobs=None;started=time.monotonic();status='budget_ended';template_seen=False;guard_context={}
+    group_calculation = None
     if improved and activation>1:
         packet=job.get('activation_inbox') or {};rows=packet.get('messages',[])
         source=next((m for m in rows if m['message_id']==(job.get('activation_source') or {}).get('source_message_id')),None)
@@ -107,12 +109,26 @@ def run_job(args,client,job):
         if task_dispatch:
             if not context['task_dispatch']['current_task']:status='subtask_no_ready_task';break
             ev.add('subtask_dispatched_to_model',node,context['task_dispatch'])
-        catalog=(ready_task_catalog(context) if scoped else task_catalog()) if task_dispatch else stable_catalog() if structured else CAT
+        explicit_execution = (scoped and revision == 'r14'
+                              and context['task_dispatch']['current_task']['task_type'] == 'EXECUTE_LOCAL_FRAGMENT'
+                              and 'execute_group_plan' in context['available_tools'])
+        if task_dispatch:
+            catalog=ready_task_catalog(context,explicit_execution=explicit_execution) if scoped else task_catalog()
+        else:
+            catalog=stable_catalog() if structured else CAT
         if structured:provider.config['tool_descriptions']={name:value[0] for name,value in catalog.items()}
-        current_input={'protocol_context':context}
+        sources = context.get('plan_calculation_sources')
+        model_context = {k: v for k, v in context.items() if k != 'plan_calculation_sources'} if sources else context
+        current_input={'protocol_context':model_context}
+        measured = current_measured_plan_options(sources, group_calculation)
+        if measured is not None:
+            current_input['observed_common_plan_options'] = measured
+            ev.add('plan_options_presented',node,{'sources': sources, 'observation': measured})
         if improved:
             card=context['task_dispatch']['current_task']
             current_input['current_assignment']={k:card[k] for k in ('task_id','task_type','role','instruction','focus_tools','completion_condition','requires_observation_before_finish','eligible_finish_statuses')}
+            if explicit_execution:
+                current_input['current_assignment']['decision_guidance'] = EXECUTION_DUTY_GUIDANCE
         model_messages=model_history(messages)+[{'role':'user','content':json.dumps(current_input,ensure_ascii=False)}]
         answer=provider.call('edge',model_messages,{k:v[1] for k,v in catalog.items()},ev)
         value=answer['parsed'];action=value['action'] if value else 'no_action' if structured else 'idle'
@@ -153,6 +169,8 @@ def run_job(args,client,job):
             if action=='wait_peer_event':time.sleep(10)
             result=client.call({'op':'tool',**base,'name':action,'arguments':arguments,'request_id':rid,**task_metadata})
         guard.outcome(key,result.get('ok',False));ev.add('node_tool_result',node,{'action':action,'arguments':arguments,'request_id':rid,'response':result})
+        if revision=='r14' and action=='calculate_link_options' and arguments.get('scope')=='group' and result.get('ok'):
+            group_calculation = result['result']
         if memory:memory.record_tool(action,value['arguments'],arguments,result,rid,activation)
         wake_rows=[]
         if action=='wait_for_collaboration' and result.get('ok'):
