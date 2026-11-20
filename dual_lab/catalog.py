@@ -6,6 +6,9 @@ CAT={
  'read_sensor_adapter':('主动读取本节点接口、资源、配置、业务原始测量；不会给出对端私有状态或异常结论。',obj({})),
  'record_finding':('记录模型自己依据观测作出的发现；不替模型判定。',obj({**ID,'has_problem':BOOL,'problem_type':S})),
  'read_peer_catalog':('获取对端身份和能力；没有实时资源读数。',obj({})),
+ 'read_local_commitments':('读取本端持久协议账本：本端接受/准备、已知授权、本端是否实际执行及最近一次执行回执。对端执行不等于本端执行。无配置动作。',obj({})),
+ 'publish_resource_snapshot':('将本端最近主动观测的原始资源快照发布给对端，供其自行计算或协商；不读取对端私有状态，不接受/执行方案。',obj(ID)),
+ 'calculate_link_options':('依据最近本端观测枚举全部端口的资源可行速率范围，扣除语音需求和背景占用。scope=local只检查本端；scope=group还需已实际收到的对端资源快照。返回全部选项，不选方案、不配置；实测可能变化，准备和执行仍核验版本。',obj({**ID,'scope':{'type':'string','enum':['local','group']}})),
  'send_peer_message':('发送给对端的事实/问题/提议。requires_response=true表示新的协作请求，可唤醒已完成普通任务的对端；不执行对端操作。',obj({'payload':{'type':'object','additionalProperties':True},'requires_response':BOOL},['payload'])),
  'read_peer_events':('读取对端已经发送的消息与计划通知；消息不自动执行。',obj({'after_sequence':{'type':'integer'}},[])),
  'wait_peer_event':('有界等待对端事件；休眠10秒再读，减少无进展推理。',obj({'after_sequence':{'type':'integer'}},[])),
@@ -32,6 +35,8 @@ finish只结束当前本地任务；服务继续接收新的协作提案，并�
 工具目录及参数是公开通用契约，不以文字或手写action JSON替代工具调用。调用封装与请求身份由框架处理。
 需要业务操作时每轮调用一个工具。没有业务动作的正常停止进入待命，不等于任务完成；只有新的对端消息会再次唤醒推理，不会定时重问同一输入。双方待命且没有待交付消息，或对端已结束且无新消息时，本轮由运行窗口收尾，不能计为模型solved。
 资源准备失败的真实回执会传给对端，接受意图不等于已经准备。你可自行调查、沟通或调用revise_group_plan修订；新方案必须重新征得对端同意，被替代方案不能执行。
+每次推理的protocol_context是本端持久协议回执，不是新的传感器观测。local_applied只表示本端实际执行；对端执行不能代替它。未完成的已授权承诺跨普通任务保留，实际执行仍由本端自主决定，并须先主动读取当前任务观测。新任务本身不撤销未过期且状态版本未变化的准备。
+可以主动使用calculate_link_options计算所有局部资源选项；publish_resource_snapshot仅分享本端已观测事实，收到对端快照后可计算group选项。计算结果不是已执行配置，也不替你选择方案。
 '''
 
 # Observation/cursor identities are transport metadata, not a handwritten JSON exam.

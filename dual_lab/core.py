@@ -1,5 +1,6 @@
 import copy,hashlib,json,sqlite3,threading,time,uuid
 from pathlib import Path
+from .feasibility import link_options
 
 def clone(x):return copy.deepcopy(x)
 def sha(x):return hashlib.sha256(json.dumps(x,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
@@ -71,18 +72,18 @@ class Plant:
         require(not c['partition'],'PEER_UNAVAILABLE','node message channel unavailable')
         message={'message_id':'msg_'+uuid.uuid4().hex[:12],'sender':n,'recipient':'B' if n=='A' else 'A','kind':kind,'payload':clone(payload),'group_task_id':c['id'],'sequence':len(c['messages'])+1}
         c['messages'].append(message);self.event('message_sent',n,message)
-        if kind in ('plan_proposed','plan_response','plan_prepared','plan_prepare_failed','plan_authorized','execution_receipt','collaboration_request'):self.activate_for_message(c,message['recipient'],message['message_id'])
+        if kind in ('plan_proposed','plan_response','plan_prepared','plan_prepare_failed','plan_authorized','execution_receipt','resource_snapshot','collaboration_request'):self.activate_for_message(c,message['recipient'],message['message_id'])
         return clone(message)
     def activate_for_message(self,c,target,message_id):
         finished=c['finished'][target]
         if finished and 'model_submission' in finished and c['decisions'][target]<64 and time.time()-c['created']<3600:
             c['node_history'][target].append(clone(finished));c['finished'][target]=None;c['activations'][target]+=1
             self.event('peer_task_enqueued',target,{'case_id':c['id'],'activation':c['activations'][target],'source_message_id':message_id})
-    def obs(self,c,n,ident):
+    def obs(self,c,n,ident,allow_prior_activation=False):
         ob=c['observations'].get(ident)
         require(ob and ob['node_id']==n,'OBSERVATION_REQUIRED','reference a real local observation')
         node=c['nodes'][n]
-        require(ob.get('activation',1)==c.get('activations',{}).get(n,1),'STALE_OBSERVATION','observation belongs to previous local task activation')
+        require(allow_prior_activation or ob.get('activation',1)==c.get('activations',{}).get(n,1),'STALE_OBSERVATION','observation belongs to previous local task activation')
         require(ob['config_version']==node['config_version'] and ob['environment_revision']==node['environment_revision'],'STALE_OBSERVATION','local state changed; actively sample again')
         require(time.time()-ob['sampled_at']<=1800,'STALE_OBSERVATION','observation expired');return ob
     def plan(self,c,pid):
@@ -94,9 +95,28 @@ class Plant:
         require(not p.get('superseded_by'),'PLAN_SUPERSEDED','plan replaced; read its revision chain')
         require(p['accepted'].get(n) is True,'NOT_ACCEPTED','node has not accepted this plan')
         ready=p['ready'].get(n);require(ready,'NOT_PREPARED','node has not prepared this plan')
-        self.obs(c,n,ready['observation_id'])
+        # Accepted reservations survive ordinary local task changes; actual writes
+        # still require a new observation in the current activation.
+        self.obs(c,n,ready['observation_id'],allow_prior_activation=True)
         require(time.time()<ready['expires_at'],'PREPARE_EXPIRED','reservation expired')
     def public_plan(self,p):return clone(p)
+    def received(self,c,n):
+        ids=set(c.get('received_message_ids',{}).get(n,[]))
+        return [m for m in c['messages'] if m['recipient']==n and m['message_id'] in ids]
+    def local_context(self,c,n):
+        received=self.received(c,n);rows=[]
+        known_auth={m['payload']['plan_id'] for m in received if m['kind']=='plan_authorized'}
+        known_auth.update(c.get('seen_authorizations',{}).get(n,[]))
+        for pid,p in c['plans'].items():
+            if n not in p['accepted']:continue
+            authorized=(n=='A' and p['authorized']) or pid in known_auth or n in p['applied']
+            superseded=next((q['plan_id'] for q in c['plans'].values() if q.get('replaces_plan_id')==pid and (q['proposer']==n or any(m['kind']=='plan_proposed' and m['payload']['plan_id']==q['plan_id'] for m in received))),None)
+            phase='superseded' if superseded else 'applied' if n in p['applied'] else 'declined' if not p['accepted'][n] else 'authorized_execution_pending' if authorized else 'prepared_waiting_authorization' if n in p['ready'] else 'accepted_not_prepared'
+            rows.append({'plan_id':pid,'plan_hash':p['plan_hash'],'local_fragment':clone(p['node_actions'][n]),'local_accepted':p['accepted'][n],
+                         'local_prepared':n in p['ready'],'authorization_known':bool(authorized),'local_applied':n in p['applied'],'local_phase':phase,
+                         'superseded_by_known':superseded,'last_local_execution_attempt':clone(c.get('execution_attempts',{}).get(n,{}).get(pid))})
+        return {'node_id':n,'commitments':rows,'pending_local_execution_plan_ids':[r['plan_id'] for r in rows if r['local_phase']=='authorized_execution_pending'],
+                'source':'local acceptance/preparation/execution receipts and actually received peer messages; no sensor read or automatic action'}
     def semantic_tool(self,c,n,name,arg):
         """Bundle this actor's bookkeeping. Peer decisions/writes remain separate.
 
@@ -143,12 +163,28 @@ class Plant:
             ob={'observation_id':'obs_'+uuid.uuid4().hex[:12],'node_id':n,'group_task_id':c['id'],'activation':c['activations'][n],'sampled_at':time.time(),**clone(node),'measurements':self.measure(c)}
             c['observations'][ob['observation_id']]=ob;return ob
         if name=='read_peer_catalog':return {'peer_id':'B' if n=='A' else 'A','capabilities':['local_configuration','group_plan_response','prepare','apply'],'coordinator':'A'}
+        if name=='read_local_commitments':return self.local_context(c,n)
+        if name=='publish_resource_snapshot':
+            ob=self.obs(c,n,arg['observation_id'])
+            return self.peer(c,n,'resource_snapshot',{'observation':clone(ob)})
+        if name=='calculate_link_options':
+            ob=self.obs(c,n,arg['observation_id']);observations={n:ob}
+            require(arg['scope'] in ('local','group'),'INVALID_ARGUMENTS','scope must be local or group')
+            if arg['scope']=='group':
+                snapshots=[m for m in self.received(c,n) if m['kind']=='resource_snapshot']
+                require(snapshots,'PEER_RESOURCE_EVIDENCE_REQUIRED','group calculation requires a received authenticated resource snapshot')
+                peer_ob=snapshots[-1]['payload']['observation']
+                require(time.time()-peer_ob['sampled_at']<=1800,'PEER_RESOURCE_EXPIRED','peer snapshot expired; a new publication is required')
+                observations[peer_ob['node_id']]=peer_ob
+            return link_options(observations,GOAL)
         if name=='send_peer_message':return self.peer(c,n,'collaboration_request' if arg.get('requires_response') else 'agent_message',arg['payload'])
         if name in ('read_peer_events','wait_peer_event'):
             require(not c['partition'],'PEER_UNAVAILABLE','node message channel unavailable')
             rows=[clone(x) for x in c['messages'] if x['recipient']==n and x['sequence']>arg.get('after_sequence',0)]
             if rows:
                 c['delivered'][n]=max(c['delivered'][n],max(x['sequence'] for x in rows))
+                seen=c.setdefault('received_message_ids',{'A':[],'B':[]})[n]
+                seen.extend(x['message_id'] for x in rows if x['message_id'] not in seen)
                 self.event('messages_received',n,{'case_id':c['id'],'message_ids':[x['message_id'] for x in rows]})
             return {'messages':rows,'cursor':len(c['messages'])}
         if name=='record_finding':
@@ -177,7 +213,11 @@ class Plant:
                 self.event('plan_superseded',n,{'case_id':c['id'],'old_plan_id':replaces,'new_plan_id':pid})
             c['plans'][pid]=p;self.peer(c,n,'plan_proposed',self.public_plan(p));return self.public_plan(p)
         if name=='read_group_plan':
-            require(not c['partition'],'PEER_UNAVAILABLE','node message channel unavailable');return self.public_plan(self.plan(c,arg['plan_id']))
+            require(not c['partition'],'PEER_UNAVAILABLE','node message channel unavailable');p=self.plan(c,arg['plan_id'])
+            if p['authorized']:
+                seen=c.setdefault('seen_authorizations',{'A':[],'B':[]})[n]
+                if p['plan_id'] not in seen:seen.append(p['plan_id'])
+            return self.public_plan(p)
         if name=='respond_group_plan':
             require(not c['partition'],'PEER_UNAVAILABLE','node message channel unavailable');self.obs(c,n,arg['observation_id'])
             p=self.plan(c,arg['plan_id']);require(not p['authorized'],'PLAN_COMMITTED','cannot revise committed decision')
@@ -256,6 +296,7 @@ class Plant:
                 boot=data['boot_id'];prior=c['boots'].get(actor)
                 require(not prior or prior==boot,'EXPLICIT_RECOVERY_REQUIRED','previous node boot already registered; explicit recovery needed');c['boots'][actor]=boot;self.save();return {'registered':actor}
             require(c['boots'].get(actor)==data.get('boot_id'),'STALE_BOOT','node boot identity mismatch')
+            if op=='local_context':return self.local_context(c,actor)
             if op in ('idle','idle_poll'):
                 waiting=c.setdefault('waiting',{'A':None,'B':None})
                 if c['finished'][actor]:return {'state':'ended'}
@@ -291,6 +332,9 @@ class Plant:
                 else:result={'ok':True,'result':self.tool(c,actor,data['name'],data['arguments'])}
             except Fault as e:result={'ok':False,'error_code':e.code,'error':str(e)}
             except (KeyError,TypeError,ValueError) as e:result={'ok':False,'error_code':'INVALID_ARGUMENTS','error':str(e)}
+            if data['name'] in ('execute_group_plan','apply_local_plan') and data['arguments'].get('plan_id') in c['plans']:
+                attempts=c.setdefault('execution_attempts',{'A':{},'B':{}})[actor]
+                attempts[data['arguments']['plan_id']]={'request_id':data['request_id'],'ok':result['ok'],'error_code':result.get('error_code')}
             self.event('tool_result',actor,{'case_id':c['id'],'request_id':data['request_id'],'action':data['name'],'arguments':data['arguments'],'response':result})
             self.db.execute('INSERT INTO requests VALUES(?,?,?)',(rid,fp,json.dumps(result)));self.save();return result
     def score(self,c):

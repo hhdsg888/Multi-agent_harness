@@ -49,7 +49,8 @@ def run_job(args,client,job):
             ev.add('peer_messages_delivered_to_model',node,{'message_ids':[x['message_id'] for x in rows],'messages':rows})
             messages.append({'role':'user','content':json.dumps({'peer_events':rows},ensure_ascii=False)})
         # Retain original goal plus a bounded recent history; full raw calls remain on disk.
-        model_messages=model_history(messages)
+        context=client.call({'op':'local_context',**base})
+        model_messages=model_history(messages)+[{'role':'user','content':json.dumps({'protocol_context':context},ensure_ascii=False)}]
         answer=provider.call('edge',model_messages,{k:v[1] for k,v in CAT.items()},ev)
         value=answer['parsed'];action=value['action'] if value else 'idle'
         client.call({'op':'trace',**base,'call_id':answer['call_id'],'action':action,'hostname':__import__('socket').gethostname(),'input_sha256':__import__('hashlib').sha256(json.dumps(model_messages,sort_keys=True,ensure_ascii=False).encode()).hexdigest(),'peer_message_ids':[x['message_id'] for row in model_messages if row['role']=='user' for x in json.loads(row['content']).get('peer_events',[])]})
@@ -65,7 +66,7 @@ def run_job(args,client,job):
             status='idle_'+state['state'];ev.add('idle_runtime_end',node,state);break
         arguments=dict(value['arguments']);key=guard.before(action,arguments,guard_context)
         argument_error=validate(arguments,CAT[action][1])
-        if action in ('record_finding','configure_local_rate','offer_group_plan','revise_group_plan','review_group_plan','execute_group_plan','finish'):
+        if action in ('record_finding','configure_local_rate','offer_group_plan','revise_group_plan','review_group_plan','execute_group_plan','publish_resource_snapshot','calculate_link_options','finish'):
             arguments['observation_id']=lastobs
         if action in ('read_peer_events','wait_peer_event') and 'after_sequence' not in arguments:arguments['after_sequence']=cursor
         ev.add('framework_identity_binding',node,{'model_arguments':value['arguments'],'effective_arguments':arguments,'business_values_rewritten':False})
