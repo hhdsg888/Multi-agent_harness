@@ -71,7 +71,7 @@ class Plant:
         require(not c['partition'],'PEER_UNAVAILABLE','node message channel unavailable')
         message={'message_id':'msg_'+uuid.uuid4().hex[:12],'sender':n,'recipient':'B' if n=='A' else 'A','kind':kind,'payload':clone(payload),'group_task_id':c['id'],'sequence':len(c['messages'])+1}
         c['messages'].append(message);self.event('message_sent',n,message)
-        if kind in ('plan_proposed','plan_response','plan_prepared','plan_authorized','execution_receipt','collaboration_request'):self.activate_for_message(c,message['recipient'],message['message_id'])
+        if kind in ('plan_proposed','plan_response','plan_prepared','plan_prepare_failed','plan_authorized','execution_receipt','collaboration_request'):self.activate_for_message(c,message['recipient'],message['message_id'])
         return clone(message)
     def activate_for_message(self,c,target,message_id):
         finished=c['finished'][target]
@@ -91,6 +91,7 @@ class Plant:
         require(isinstance(v,dict) and set(v)=={'path','channel','video_rate_mbps'},'INVALID_PLAN','use path/channel/video_rate_mbps per node')
         require(v['path'] in ('primary','backup') and v['channel'] in ('c1','c2') and type(v['video_rate_mbps']) in (int,float) and 2<=v['video_rate_mbps']<=5,'INVALID_PLAN','unsupported path/channel or video outside allowed 2..5Mbps')
     def check_ready(self,c,n,p):
+        require(not p.get('superseded_by'),'PLAN_SUPERSEDED','plan replaced; read its revision chain')
         require(p['accepted'].get(n) is True,'NOT_ACCEPTED','node has not accepted this plan')
         ready=p['ready'].get(n);require(ready,'NOT_PREPARED','node has not prepared this plan')
         self.obs(c,n,ready['observation_id'])
@@ -101,14 +102,18 @@ class Plant:
 
         Outer RPC durably caches the complete receipt, including partial stages.
         """
-        stages=[];pid=arg.get('plan_id')
+        stages=[];pid=arg.get('plan_id');current_stage=None
         def stage(action,arguments):
+            nonlocal current_stage
+            current_stage=action
             value=self.tool(c,n,action,arguments)
             stages.append({'action':action,'result':clone(value)});return value
         try:
             ob={'observation_id':arg.get('observation_id')}
-            if name=='offer_group_plan':
-                p=stage('propose_group_plan',{**ob,'node_actions':arg['node_actions']});pid=p['plan_id']
+            if name in ('offer_group_plan','revise_group_plan'):
+                proposal={**ob,'node_actions':arg['node_actions']}
+                if name=='revise_group_plan':proposal['replaces_plan_id']=pid
+                p=stage('propose_group_plan',proposal);pid=p['plan_id']
                 stage('prepare_local_plan',{**ob,'plan_id':pid})
             elif name=='review_group_plan':
                 stage('respond_group_plan',{**ob,'plan_id':pid,'accept':arg['accept'],'explanation':arg.get('explanation','')})
@@ -120,6 +125,14 @@ class Plant:
             else:raise Fault('UNKNOWN_TOOL',name)
             return {'ok':True,'result':{'plan_id':pid,'stages':stages,'plan':self.public_plan(self.plan(c,pid))}}
         except Fault as e:
+            if current_stage=='prepare_local_plan' and pid and not c['partition']:
+                failure={'plan_id':pid,'node_id':n,'error_code':e.code,'detail':str(e),'configuration_applied':False}
+                if e.code in ('LOCAL_RESOURCE_LIMIT','PHYSICAL_UNAVAILABLE'):
+                    observed=c['observations'][arg['observation_id']];fragment=self.plan(c,pid)['node_actions'][n]
+                    failure['reported_local_constraints']={'observation_id':observed['observation_id'],'path':fragment['path'],'port':clone(observed['ports'][fragment['path']]),'background_mbps':observed['background_mbps'],'requested_video_rate_mbps':fragment['video_rate_mbps']}
+                self.plan(c,pid).setdefault('preparation_failures',{})[n]=clone(failure)
+                self.plan(c,pid)['ready'].pop(n,None)
+                self.peer(c,n,'plan_prepare_failed',failure)
             return {'ok':False,'error_code':e.code,'error':str(e),'result':{'plan_id':pid,'completed_stages':stages,'partial_progress':bool(stages)}}
         except (KeyError,TypeError,ValueError) as e:
             return {'ok':False,'error_code':'INVALID_ARGUMENTS','error':str(e),'result':{'plan_id':pid,'completed_stages':stages,'partial_progress':bool(stages)}}
@@ -149,26 +162,37 @@ class Plant:
         if name=='propose_group_plan':
             require(not c['partition'],'PEER_UNAVAILABLE','node message channel unavailable')
             self.obs(c,n,arg['observation_id']);changes=arg['node_actions']
+            replaces=arg.get('replaces_plan_id')
+            if replaces:
+                old=self.plan(c,replaces)
+                require(not old['authorized'] and not old['applied'],'PLAN_COMMITTED','cannot replace a committed or partially applied plan')
+                require(not old.get('superseded_by'),'PLAN_SUPERSEDED','replace the current revision, not an old plan')
             require(set(changes)=={'A','B'},'INVALID_PLAN','supply A and B plan fragments')
             for owner,v in changes.items():self.valid_actions(c,owner,v)
             require(changes['A']['path']==changes['B']['path'] and changes['A']['channel']==changes['B']['channel'],'INCOMPATIBLE_ENDPOINTS','both endpoints require same path and channel')
             pid='plan_'+uuid.uuid4().hex[:10]
             p={'plan_id':pid,'plan_revision':len(c['plans'])+1,'group_task_id':c['id'],'plan_hash':sha(changes),'node_actions':clone(changes),'proposer':n,'accepted':{n:True},'ready':{},'authorized':False,'applied':[]}
+            if replaces:
+                old['superseded_by']=pid;p['replaces_plan_id']=replaces
+                self.event('plan_superseded',n,{'case_id':c['id'],'old_plan_id':replaces,'new_plan_id':pid})
             c['plans'][pid]=p;self.peer(c,n,'plan_proposed',self.public_plan(p));return self.public_plan(p)
         if name=='read_group_plan':
             require(not c['partition'],'PEER_UNAVAILABLE','node message channel unavailable');return self.public_plan(self.plan(c,arg['plan_id']))
         if name=='respond_group_plan':
             require(not c['partition'],'PEER_UNAVAILABLE','node message channel unavailable');self.obs(c,n,arg['observation_id'])
             p=self.plan(c,arg['plan_id']);require(not p['authorized'],'PLAN_COMMITTED','cannot revise committed decision')
+            require(not p.get('superseded_by'),'PLAN_SUPERSEDED','plan replaced; read its revision chain')
             require(type(arg['accept']) is bool,'INVALID_ARGUMENTS','accept must be boolean');p['accepted'][n]=arg['accept'];p['ready'].pop(n,None)
             self.peer(c,n,'plan_response',{'plan_id':p['plan_id'],'accept':arg['accept'],'explanation':arg.get('explanation','')});return self.public_plan(p)
         if name=='prepare_local_plan':
             require(not c['partition'],'PEER_UNAVAILABLE','node message channel unavailable')
             self.obs(c,n,arg['observation_id']);p=self.plan(c,arg['plan_id']);require(p['accepted'].get(n) is True,'NOT_ACCEPTED','accept plan first')
+            require(not p.get('superseded_by'),'PLAN_SUPERSEDED','plan replaced; read its revision chain')
             v=p['node_actions'][n];port=node['ports'][v['path']]
             require(port['physical_up'],'PHYSICAL_UNAVAILABLE','selected local port is physically unavailable')
             require(.25+v['video_rate_mbps']<=max(0,port['capacity_mbps']-node['background_mbps']),'LOCAL_RESOURCE_LIMIT','requested local reservation exceeds available capacity')
             p['ready'][n]={'node_id':n,'observation_id':arg['observation_id'],'plan_hash':p['plan_hash'],'expires_at':time.time()+1800}
+            p.get('preparation_failures',{}).pop(n,None)
             self.peer(c,n,'plan_prepared',{'plan_id':p['plan_id'],'node_id':n,'plan_hash':p['plan_hash']})
             if c['fixture']=='T05' and len(p['ready'])==2 and not c['stale_injected']:
                 c['stale_injected']=True;c['nodes']['B']['ports']['backup']['capacity_mbps']=3.;c['nodes']['B']['environment_revision']+=1
@@ -232,6 +256,24 @@ class Plant:
                 boot=data['boot_id'];prior=c['boots'].get(actor)
                 require(not prior or prior==boot,'EXPLICIT_RECOVERY_REQUIRED','previous node boot already registered; explicit recovery needed');c['boots'][actor]=boot;self.save();return {'registered':actor}
             require(c['boots'].get(actor)==data.get('boot_id'),'STALE_BOOT','node boot identity mismatch')
+            if op in ('idle','idle_poll'):
+                waiting=c.setdefault('waiting',{'A':None,'B':None})
+                if c['finished'][actor]:return {'state':'ended'}
+                if op=='idle':
+                    waiting[actor]={'after_sequence':data['after_sequence'],'call_id':data['call_id']}
+                    self.event('node_waiting',actor,{'case_id':c['id'],**waiting[actor]})
+                require(waiting[actor] is not None,'NOT_WAITING','idle entry required')
+                cursor=waiting[actor]['after_sequence']
+                pending=[m for m in c['messages'] if m['recipient']==actor and m['sequence']>cursor]
+                if pending and not c['partition']:
+                    inbox=self.tool(c,actor,'read_peer_events',{'after_sequence':cursor});waiting[actor]=None
+                    self.event('node_woken',actor,{'case_id':c['id'],'message_ids':[m['message_id'] for m in inbox['messages']]})
+                    self.save();return {'state':'ready',**inbox}
+                peer='B' if actor=='A' else 'A'
+                peer_wait=waiting[peer]
+                peer_pending=peer_wait and any(m['recipient']==peer and m['sequence']>peer_wait['after_sequence'] for m in c['messages'])
+                quiet=(c['finished'][peer] is not None or peer_wait is not None) and not peer_pending
+                self.save();return {'state':'quiescent' if quiet else 'waiting','channel_available':not c['partition']}
             if op=='trace':
                 c['decisions'][actor]+=1
                 self.event('model_turn',actor,{k:v for k,v in data.items() if k not in ('op','boot_id')});self.save();return {'recorded':True}
@@ -245,7 +287,7 @@ class Plant:
                 require(row[0]==fp,'REQUEST_ID_CONFLICT','same request_id with different operation');return json.loads(row[1])
             require('node_id' not in data['arguments'] or data['arguments']['node_id']==actor,'FORBIDDEN','cannot address another node executor')
             try:
-                if data['name'] in ('offer_group_plan','review_group_plan','execute_group_plan'):result=self.semantic_tool(c,actor,data['name'],data['arguments'])
+                if data['name'] in ('offer_group_plan','revise_group_plan','review_group_plan','execute_group_plan'):result=self.semantic_tool(c,actor,data['name'],data['arguments'])
                 else:result={'ok':True,'result':self.tool(c,actor,data['name'],data['arguments'])}
             except Fault as e:result={'ok':False,'error_code':e.code,'error':str(e)}
             except (KeyError,TypeError,ValueError) as e:result={'ok':False,'error_code':'INVALID_ARGUMENTS','error':str(e)}

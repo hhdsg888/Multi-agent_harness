@@ -15,6 +15,15 @@ def failure_identity(folder):
         if row.get('kind')=='node_identity':return row['data']
     raise RuntimeError('node identity event missing; preserve failure for explicit recovery')
 
+def await_peer(client,base,cursor,call_id,seconds=180,sleep=time.sleep,now=time.monotonic):
+    deadline=now()+seconds
+    state=client.call({'op':'idle',**base,'after_sequence':cursor,'call_id':call_id})
+    while state['state']=='waiting' and now()<deadline:
+        sleep(min(2,max(0,deadline-now())))
+        state=client.call({'op':'idle_poll',**base})
+    if state['state']=='waiting':return {'state':'timeout'}
+    return state
+
 def run_job(args,client,job):
     cid=job['group_task_id'];node=args.node;boot=args.boot
     folder=args.root/'runs'/cid/node
@@ -42,10 +51,21 @@ def run_job(args,client,job):
         # Retain original goal plus a bounded recent history; full raw calls remain on disk.
         model_messages=model_history(messages)
         answer=provider.call('edge',model_messages,{k:v[1] for k,v in CAT.items()},ev)
-        value=answer['parsed'];action=value['action'];arguments=dict(value['arguments']);key=guard.before(action,arguments,guard_context)
+        value=answer['parsed'];action=value['action'] if value else 'idle'
         client.call({'op':'trace',**base,'call_id':answer['call_id'],'action':action,'hostname':__import__('socket').gethostname(),'input_sha256':__import__('hashlib').sha256(json.dumps(model_messages,sort_keys=True,ensure_ascii=False).encode()).hexdigest(),'peer_message_ids':[x['message_id'] for row in model_messages if row['role']=='user' for x in json.loads(row['content']).get('peer_events',[])]})
+        if value is None:
+            messages.append(answer['assistant_message'])
+            ev.add('native_idle',node,{'call_id':answer['call_id'],'same_input_retry':False,'tool_executed':False})
+            write_json(folder/'progress.json',{'steps':step+1,'last_action':'idle','status':'waiting_peer'})
+            state=await_peer(client,base,cursor,answer['call_id'],min(180,max(0,job.get('remaining_seconds',3600)-(time.monotonic()-started))))
+            if state['state']=='ready':
+                rows=state['messages'];cursor=state['cursor']
+                ev.add('peer_messages_delivered_to_model',node,{'message_ids':[x['message_id'] for x in rows],'messages':rows,'source':'idle_wakeup'})
+                messages.append({'role':'user','content':json.dumps({'peer_events':rows},ensure_ascii=False)});continue
+            status='idle_'+state['state'];ev.add('idle_runtime_end',node,state);break
+        arguments=dict(value['arguments']);key=guard.before(action,arguments,guard_context)
         argument_error=validate(arguments,CAT[action][1])
-        if action in ('record_finding','configure_local_rate','offer_group_plan','review_group_plan','execute_group_plan','finish'):
+        if action in ('record_finding','configure_local_rate','offer_group_plan','revise_group_plan','review_group_plan','execute_group_plan','finish'):
             arguments['observation_id']=lastobs
         if action in ('read_peer_events','wait_peer_event') and 'after_sequence' not in arguments:arguments['after_sequence']=cursor
         ev.add('framework_identity_binding',node,{'model_arguments':value['arguments'],'effective_arguments':arguments,'business_values_rewritten':False})
@@ -72,7 +92,9 @@ def run_job(args,client,job):
         write_json(folder/'progress.json',{'steps':step+1,'last_action':action,'last_observation_id':lastobs,'status':'running'})
         if action=='finish' and result.get('ok'):
             status=arguments['status'];ledger.transition('solved' if status=='solved' else 'unresolved',{'model_submission':arguments});break
-    if status not in ('solved','unresolved','needs_resources'):client.call({'op':'runtime_end',**base,'reason':status})
+    if status not in ('solved','unresolved','needs_resources'):
+        client.call({'op':'runtime_end',**base,'reason':status})
+        ledger.transition('unresolved',{'runtime_status':status,'model_submission':None})
     write_json(folder/'result.json',{'status':status,'elapsed_seconds':time.monotonic()-started,'model_calls':provider.counter,'node_id':node})
 
 def main():

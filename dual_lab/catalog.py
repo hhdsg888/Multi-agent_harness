@@ -11,6 +11,7 @@ CAT={
  'wait_peer_event':('有界等待对端事件；休眠10秒再读，减少无进展推理。',obj({'after_sequence':{'type':'integer'}},[])),
  'configure_local_rate':('仅修改本节点视频速率上限2..5Mbps；不切换链路，不修改对端。',obj({**ID,'video_rate_mbps':NUM})),
  'offer_group_plan':('提出双方配置片段并准备本端资源。每节点path/channel/video_rate_mbps；两端路径和信道须一致。提议者接受自己的方案；对端仍须自主审议。不写配置。回执保留计划ID及部分完成步骤。',obj({**ID,'node_actions':obj({'A':FRAGMENT,'B':FRAGMENT})})),
+ 'revise_group_plan':('用模型重新选择的双方配置替换指定未授权方案，并准备本端。旧方案立即失效，新方案仅修订者接受，对端必须重新独立审议。不能替换已授权或部分执行方案。不自动选择路径或速率。',obj({**ID,**PLAN,'node_actions':obj({'A':FRAGMENT,'B':FRAGMENT})})),
  'review_group_plan':('依据本机观测自主接受或拒绝指定计划。接受时一并准备本端资源；拒绝时不准备。不写配置，可重新审议以刷新准备。',obj({**ID,**PLAN,'accept':BOOL,'explanation':S},['observation_id','plan_id','accept'])),
  'read_group_plan':('读取指定共同计划的双方接受、准备、授权和执行回执状态。',obj(PLAN)),
  'execute_group_plan':('自主决定执行指定共同计划的本端片段。A调用时先检查双方接受/有效准备并授权，再只执行A；B只能执行已获A授权且自身准备有效的B片段。对端必须自己另行调用。成功后主动复采。',obj({**ID,**PLAN})),
@@ -28,7 +29,9 @@ SYSTEM='''你是通信现场的端侧自主智能体，使用本机工具观察�
 finish只结束当前本地任务；服务继续接收新的协作提案，并以新的本地任务激活。所有任务共用本场景的决策和时间预算；失败任务不会因消息自动重开。
 模型自己判断是否异常、如何组合工具、是否协作、是否结束；可调用record_finding记录判断。知识仅参考，不覆盖当前真实观测。
 业务目标为语音满足率至少95%、视频至少2Mbps，期望5Mbps；视频可在2..5内降级。不要因工具返回成功就声称任务完成。
-工具目录及参数是公开通用契约。每轮使用且只使用一个原生工具调用，不以文字或手写action JSON替代。调用封装与请求身份由框架处理。
+工具目录及参数是公开通用契约，不以文字或手写action JSON替代工具调用。调用封装与请求身份由框架处理。
+需要业务操作时每轮调用一个工具。没有业务动作的正常停止进入待命，不等于任务完成；只有新的对端消息会再次唤醒推理，不会定时重问同一输入。双方待命且没有待交付消息，或对端已结束且无新消息时，本轮由运行窗口收尾，不能计为模型solved。
+资源准备失败的真实回执会传给对端，接受意图不等于已经准备。你可自行调查、沟通或调用revise_group_plan修订；新方案必须重新征得对端同意，被替代方案不能执行。
 '''
 
 # Observation/cursor identities are transport metadata, not a handwritten JSON exam.

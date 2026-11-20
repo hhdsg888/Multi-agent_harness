@@ -3,10 +3,12 @@ import copy,json,time,urllib.request
 from collab_lab import providers as transport
 from collab_lab.common import dumps,write_json
 
-def parse_native(raw,actions,ident):
+def parse_native(raw,actions,ident,allow_idle=False):
     if not raw.get('done') or raw.get('done_reason')=='length':
         raise transport.IncompleteResponseError('Native tool response incomplete',raw.get('done_reason'),ident)
     calls=raw.get('message',{}).get('tool_calls',[])
+    if not isinstance(calls,list):raise ValueError('Malformed native tool_calls')
+    if not calls and allow_idle and raw.get('done_reason')=='stop':return None
     if len(calls)!=1:raise ValueError('Expected exactly one native tool call; no text fallback or partial execution')
     function=calls[0].get('function',{})
     if function.get('name') not in actions or not isinstance(function.get('arguments'),dict):
@@ -30,8 +32,8 @@ class NodeProviders(transport.Providers):
         try:
             request=urllib.request.Request(connection['base_url'].rstrip('/')+'/api/chat',data=dumps(body).encode(),headers=headers)
             with opener.open(request,timeout=self.config.get('edge_request_timeout_seconds',900)) as response:raw=json.load(response)
-            parsed=parse_native(raw,actions,ident)
-            result={'parsed':parsed,'content':raw['message'].get('content',''),'assistant_message':raw['message'],
+            parsed=parse_native(raw,actions,ident,allow_idle=True)
+            result={'parsed':parsed,'control':'idle' if parsed is None else 'tool_call','content':raw['message'].get('content',''),'assistant_message':raw['message'],
                     'raw':raw,'model':connection['model'],'call_id':ident,'seconds':time.monotonic()-started,
                     'finish_reason':raw.get('done_reason'),'attempt':attempt,'retry_of':retry_of,
                     'usage':{'prompt_tokens':raw.get('prompt_eval_count'),'output_tokens':raw.get('eval_count')}}
