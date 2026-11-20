@@ -1,0 +1,26 @@
+{
+  "id": "capability-gap-report",
+  "version": "1.0",
+  "purpose": "帮助端侧整理能力缺口，供云端调查或制作工具；不是固定内容schema。",
+  "editing_policy": "以下字段只是可编辑草稿。可以增删、改名、改变结构或替换示例字段，不要求保留原字段，也不要求填满。依据已观察事实填写；框架不代写原因、方案或结论。",
+  "report": {
+    "problem_summary": "",
+    "current_goal": "",
+    "observed_facts": [],
+    "attempted_actions_and_results": [],
+    "missing_capability": "",
+    "requested_tool": {},
+    "verification_expectation": [],
+    "resource_or_permission_limits": []
+  },
+  "field_guidance": {
+    "problem_summary": "目前有什么问题、影响什么业务。",
+    "current_goal": "需要达到的现场任务目标。",
+    "observed_facts": "状态、协议、指标、错误或回执引用；不要将猜测写成已确认事实。",
+    "attempted_actions_and_results": "实际尝试过的工具、参数和结果；不要求证明穷举。",
+    "missing_capability": "现有能力具体缺少什么，与参数错误、物理资源不足区分。",
+    "requested_tool": "希望补充的能力、输入输出和约束；不替云端预填实现代码。",
+    "verification_expectation": "怎样用真实执行或独立证据判断补充能力有效。",
+    "resource_or_permission_limits": "目前可见的外部资源或权限限制。"
+  }
+}

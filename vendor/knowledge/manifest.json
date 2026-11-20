@@ -1,0 +1,12 @@
+{
+  "version": "synthetic-knowledge-strategy-20261028-v1",
+  "scope": "1.1.1接入前的合成演示资料，仅依据本项目数字环境契约编写；不是正式电力应急规范、真实抢修经验或已验收知识库。",
+  "files": ["knowledge.json", "strategies.json"],
+  "retrieval": {"method": "BM25 Chinese bigrams and English terms", "top_k": 3, "chunk_chars": 1200, "overlap_chars": 120},
+  "aliases": {
+    "链路": ["link", "回传"], "路由": ["route", "路径"],
+    "拥塞": ["congestion", "积压", "queue"], "容量": ["capacity", "带宽"],
+    "语音": ["voice"], "视频": ["video"], "协议": ["protocol", "接口"],
+    "版本": ["version", "过期"], "备用": ["backup", "备链路"]
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "id": "830c06fe2075",
+  "author_model": "qwen3.8-flash-next-iq3_xxs",
+  "author_call_id": "000001",
+  "author_job_id": "d47271f129f2",
+  "created": "2026-10-28T10:38:10.883+08:00",
+  "source": "qwen_original_response",
+  "functions": [
+    "observe",
+    "inspect_links",
+    "inspect_services",
+    "list_routes",
+    "retrieve_knowledge",
+    "service_operations",
+    "device_operations"
+  ],
+  "source_sha256": "800798fca4d35ac8859f7c809c9394e39a79157780040e5866a81be26584a514",
+  "published": "2026-10-28T10:38:19.193+08:00",
+  "contract_cases": 20
+}

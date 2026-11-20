@@ -1,0 +1,19 @@
+# Publish only the runtime architecture and its pinned dependencies.
+/*
+!/.gitignore
+!/README.md
+!/VERSION.json
+!/HISTORY_MAP.json
+!/REVISION_HISTORY.json
+!/baseline_manifest.json
+!/initialize.py
+!/dual_lab/
+!/vendor/
+/dual_lab/evaluate.py
+/dual_lab/workflow.py
+/dual_lab/flexible_audit.py
+**/__pycache__/
+*.pyc
+auth.local.json
+*.tar
+*.tar.gz
