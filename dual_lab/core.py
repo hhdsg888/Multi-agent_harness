@@ -28,9 +28,10 @@ class Plant:
         self.db.execute("INSERT OR REPLACE INTO state VALUES('plant',?)",(json.dumps(self.state),));self.db.commit()
     def event(self,kind,actor,data):
         self.db.execute('INSERT INTO events(kind,actor,body) VALUES(?,?,?)',(kind,actor,json.dumps({'time':time.time(),**data},ensure_ascii=False)))
-    def create(self,label,change_policy='after_samples'):
+    def create(self,label,change_policy='after_samples',protocol_mode='legacy'):
         require(label in CASES,'UNKNOWN_CASE','unknown fixture')
         require(change_policy in ('after_samples','at_start'),'INVALID_POLICY','unknown change policy')
+        require(protocol_mode in ('legacy','structured'),'INVALID_POLICY','unknown protocol mode')
         if self.state['active']:
             prior=self.case(self.state['active']);require(all(prior['finished'].values()),'ACTIVE_CASE','previous case still active')
         cid='group_'+uuid.uuid4().hex[:12]
@@ -38,7 +39,7 @@ class Plant:
                  'selected_path':'primary','video_rate_mbps':5.,'background_mbps':0.,
                  'ports':{'primary':{'physical_up':True,'enabled':True,'channel':'c1','capacity_mbps':8.},
                           'backup':{'physical_up':True,'enabled':False,'channel':'c2','capacity_mbps':6.}}} for n in ('A','B')}
-        case={'id':cid,'fixture':label,'change_policy':change_policy,'minimum_samples':2 if change_policy=='at_start' else 4,'nodes':nodes,'observations':{},'messages':[],
+        case={'id':cid,'fixture':label,'protocol_mode':protocol_mode,'active_plan_id':None,'change_policy':change_policy,'minimum_samples':2 if change_policy=='at_start' else 4,'nodes':nodes,'observations':{},'messages':[],
               'plans':{},'finished':{'A':None,'B':None},'changed':False,'stale_injected':False,
               'partition':False,'created':time.time(),'findings':[],'executions':[],'boots':{},'peer_delivery':[],
               'activations':{'A':1,'B':1},'node_history':{'A':[],'B':[]},'decisions':{'A':0,'B':0},'delivered':{'A':0,'B':0}}
@@ -72,7 +73,7 @@ class Plant:
         require(not c['partition'],'PEER_UNAVAILABLE','node message channel unavailable')
         message={'message_id':'msg_'+uuid.uuid4().hex[:12],'sender':n,'recipient':'B' if n=='A' else 'A','kind':kind,'payload':clone(payload),'group_task_id':c['id'],'sequence':len(c['messages'])+1}
         c['messages'].append(message);self.event('message_sent',n,message)
-        if kind in ('plan_proposed','plan_response','plan_prepared','plan_prepare_failed','plan_authorized','execution_receipt','resource_snapshot','collaboration_request'):self.activate_for_message(c,message['recipient'],message['message_id'])
+        if kind in ('plan_proposed','plan_response','plan_prepared','plan_prepare_failed','plan_authorized','execution_receipt','resource_snapshot','resource_request','collaboration_request'):self.activate_for_message(c,message['recipient'],message['message_id'])
         return clone(message)
     def activate_for_message(self,c,target,message_id):
         finished=c['finished'][target]
@@ -256,7 +257,7 @@ class Plant:
         if name=='finish':
             self.obs(c,n,arg['observation_id'])
             enough=node['sample_sequence']>=2 if c.get('change_policy')=='at_start' else min(x['sample_sequence'] for x in c['nodes'].values())>=4
-            require(enough,'OBSERVATION_WINDOW','required active observation window has not completed')
+            if c.get('protocol_mode')!='structured':require(enough,'OBSERVATION_WINDOW','required active observation window has not completed')
             require(arg['status'] in ('solved','unresolved','needs_resources'),'INVALID_ARGUMENTS','unknown finish status')
             c['finished'][n]={'model_submission':clone(arg),'measurements':self.measure(c),'finished_at':time.time()}
             pending=[m for m in c['messages'] if m['recipient']==n and m['sequence']>c['delivered'][n] and m['kind']!='agent_message']
@@ -271,7 +272,7 @@ class Plant:
                     if self.state['active']:require(all(self.case(self.state['active'])['finished'].values()),'ACTIVE_CASE','previous suite still has live nodes')
                     self.state.update(suite_done=False,active=None,suite_name=data['name']);self.save();return {'started':data['name']}
                 if op=='suite_end':self.state['suite_done']=True;self.save();return {'stopped':True}
-                if op=='create':return {'case_id':self.create(data['fixture'],data.get('change_policy','after_samples'))}
+                if op=='create':return {'case_id':self.create(data['fixture'],data.get('change_policy','after_samples'),data.get('protocol_mode','legacy'))}
                 if op=='snapshot':return clone(self.case(data['case_id']))
                 if op=='force_end':
                     c=self.case(data['case_id'])
@@ -290,31 +291,38 @@ class Plant:
                 c=self.case(cid)
                 if c['finished'][actor]:return {'job':None}
                 goal={**GOAL,'observation_window_per_node':c.get('minimum_samples',4)}
-                return {'job':{'group_task_id':cid,'node_id':actor,'goal':goal,'cloud_available':False,'activation':c.get('activations',{}).get(actor,1),'remaining_decisions':64-c.get('decisions',{}).get(actor,0),'remaining_seconds':max(0,3600-(time.time()-c['created']))}}
+                if c.get('protocol_mode')=='structured':goal={**goal,'observation_window_per_node':1,'completion_semantics':'solved means verified minimum service floor; desired quality and protocol completion are separate','voice_satisfaction_definition':'voice_delivered_mbps / voice_demand_mbps'}
+                return {'job':{'group_task_id':cid,'node_id':actor,'goal':goal,'cloud_available':False,'protocol_mode':c.get('protocol_mode','legacy'),'activation':c.get('activations',{}).get(actor,1),'remaining_decisions':64-c.get('decisions',{}).get(actor,0),'remaining_seconds':max(0,3600-(time.time()-c['created']))}}
             c=self.case(data['case_id'])
             if op=='register':
                 boot=data['boot_id'];prior=c['boots'].get(actor)
                 require(not prior or prior==boot,'EXPLICIT_RECOVERY_REQUIRED','previous node boot already registered; explicit recovery needed');c['boots'][actor]=boot;self.save();return {'registered':actor}
             require(c['boots'].get(actor)==data.get('boot_id'),'STALE_BOOT','node boot identity mismatch')
             if op=='local_context':return self.local_context(c,actor)
+            if op=='runtime_state':
+                from .protocol import StructuredProtocol
+                return StructuredProtocol(self,c,actor).state(data.get('observation_id'))
             if op in ('idle','idle_poll'):
                 waiting=c.setdefault('waiting',{'A':None,'B':None})
                 if c['finished'][actor]:return {'state':'ended'}
                 if op=='idle':
+                    require(c.get('protocol_mode')!='structured','EXPLICIT_WAIT_REQUIRED','structured tasks require an explicit wait tool choice')
                     waiting[actor]={'after_sequence':data['after_sequence'],'call_id':data['call_id']}
                     self.event('node_waiting',actor,{'case_id':c['id'],**waiting[actor]})
                 require(waiting[actor] is not None,'NOT_WAITING','idle entry required')
                 cursor=waiting[actor]['after_sequence']
                 pending=[m for m in c['messages'] if m['recipient']==actor and m['sequence']>cursor]
                 if pending and not c['partition']:
-                    inbox=self.tool(c,actor,'read_peer_events',{'after_sequence':cursor});waiting[actor]=None
+                    intent=clone(waiting[actor]);inbox=self.tool(c,actor,'read_peer_events',{'after_sequence':cursor});waiting[actor]=None
                     self.event('node_woken',actor,{'case_id':c['id'],'message_ids':[m['message_id'] for m in inbox['messages']]})
-                    self.save();return {'state':'ready',**inbox}
+                    expected={'peer_resources':('resource_snapshot',),'plan_update':('plan_proposed','plan_response'),'authorization':('plan_authorized',),'execution_receipt':('execution_receipt',)}.get(intent.get('awaited'),())
+                    self.save();return {'state':'ready',**inbox,'awaited':intent.get('awaited'),'awaited_event_observed':any(m['kind'] in expected for m in inbox['messages'])}
                 peer='B' if actor=='A' else 'A'
                 peer_wait=waiting[peer]
                 peer_pending=peer_wait and any(m['recipient']==peer and m['sequence']>peer_wait['after_sequence'] for m in c['messages'])
                 quiet=(c['finished'][peer] is not None or peer_wait is not None) and not peer_pending
-                self.save();return {'state':'quiescent' if quiet else 'waiting','channel_available':not c['partition']}
+                terminal='deadlock' if c.get('protocol_mode')=='structured' else 'quiescent'
+                self.save();return {'state':terminal if quiet else 'waiting','channel_available':not c['partition']}
             if op=='trace':
                 c['decisions'][actor]+=1
                 self.event('model_turn',actor,{k:v for k,v in data.items() if k not in ('op','boot_id')});self.save();return {'recorded':True}
@@ -328,7 +336,10 @@ class Plant:
                 require(row[0]==fp,'REQUEST_ID_CONFLICT','same request_id with different operation');return json.loads(row[1])
             require('node_id' not in data['arguments'] or data['arguments']['node_id']==actor,'FORBIDDEN','cannot address another node executor')
             try:
-                if data['name'] in ('offer_group_plan','revise_group_plan','review_group_plan','execute_group_plan'):result=self.semantic_tool(c,actor,data['name'],data['arguments'])
+                if c.get('protocol_mode')=='structured':
+                    from .protocol import StructuredProtocol
+                    result=StructuredProtocol(self,c,actor).dispatch(data['name'],data['arguments'])
+                elif data['name'] in ('offer_group_plan','revise_group_plan','review_group_plan','execute_group_plan'):result=self.semantic_tool(c,actor,data['name'],data['arguments'])
                 else:result={'ok':True,'result':self.tool(c,actor,data['name'],data['arguments'])}
             except Fault as e:result={'ok':False,'error_code':e.code,'error':str(e)}
             except (KeyError,TypeError,ValueError) as e:result={'ok':False,'error_code':'INVALID_ARGUMENTS','error':str(e)}
@@ -349,4 +360,15 @@ class Plant:
                 'restoration_verified':c['fixture']!='T00' and solved and bool(full or local_writes),
                 'normal_unnecessary_writes':len(c['executions'])+local_writes if c['fixture']=='T00' else None,
                 'correct_solved_confirmation':{n:bool(x and x.get('model_submission',{}).get('status')=='solved' and solved) for n,x in c['finished'].items()},
-                'changed':c['changed'],'prepare_change_observed':c['stale_injected'],'peer_partition_observed':c['partition']}
+                'changed':c['changed'],'prepare_change_observed':c['stale_injected'],'peer_partition_observed':c['partition'],
+                'service_floor_met':solved,'desired_quality_met':solved and m['video_delivered_mbps']>=GOAL['video_desired_mbps'],
+                'protocol_status':self.protocol_status(c),'sample_sequences':{n:v['sample_sequence'] for n,v in c['nodes'].items()},
+                'sampling_window_compliant':{n:v['sample_sequence']>=2 for n,v in c['nodes'].items()}}
+    def protocol_status(self,c):
+        p=c['plans'].get(c.get('active_plan_id'))
+        if p is None:return 'not_started'
+        if set(p['applied'])=={'A','B'}:return 'applied_both'
+        if p['authorized']:return 'authorized_partial' if p['applied'] else 'authorized'
+        if set(p['ready'])=={'A','B'}:return 'prepared'
+        if any(v is False for v in p['accepted'].values()):return 'declined'
+        return 'negotiating'

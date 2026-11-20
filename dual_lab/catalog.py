@@ -6,6 +6,8 @@ CAT={
  'read_sensor_adapter':('主动读取本节点接口、资源、配置、业务原始测量；不会给出对端私有状态或异常结论。',obj({})),
  'record_finding':('记录模型自己依据观测作出的发现；不替模型判定。',obj({**ID,'has_problem':BOOL,'problem_type':S})),
  'read_peer_catalog':('获取对端身份和能力；没有实时资源读数。',obj({})),
+ 'request_peer_resources':('明确请求对端发布其主动观测的资源快照；对端仍自行决定读取和发布，不自动替对端采样。',obj({'reason':S},[])),
+ 'wait_for_collaboration':('明确声明等待对端资源、方案变更、授权或执行回执；只有真实新消息才唤醒，无新消息不重新生成答案。',obj({'awaited':{'type':'string','enum':['peer_resources','plan_update','authorization','execution_receipt']}})),
  'read_local_commitments':('读取本端持久协议账本：本端接受/准备、已知授权、本端是否实际执行及最近一次执行回执。对端执行不等于本端执行。无配置动作。',obj({})),
  'publish_resource_snapshot':('将本端最近主动观测的原始资源快照发布给对端，供其自行计算或协商；不读取对端私有状态，不接受/执行方案。',obj(ID)),
  'calculate_link_options':('依据最近本端观测枚举全部端口的资源可行速率范围，扣除语音需求和背景占用。scope=local只检查本端；scope=group还需已实际收到的对端资源快照。返回全部选项，不选方案、不配置；实测可能变化，准备和执行仍核验版本。',obj({**ID,'scope':{'type':'string','enum':['local','group']}})),
@@ -45,3 +47,30 @@ for _name,(_description,_schema) in list(CAT.items()):
         _schema['properties'].pop('observation_id')
         _schema['required'].remove('observation_id')
         CAT[_name]=(_description+' 观测身份由框架绑定最近一次主动采样；未采样或过期会拒绝。',_schema)
+
+STRUCTURED_SYSTEM='''你是通信现场端侧自主智能体。A维护当前共同方案及其唯一修订链，B负责本端资源意见；B可主动请求协作、提出修改建议、接受或拒绝方案。两端均只执行自己的片段。
+工具按当前协议状态开放。你自主决定如何调查、选择配置、接受或拒绝、执行与核验；框架只管理前置条件、身份、消息及当前方案版本，不选择业务参数。
+主动传感器观测才是现场事实。protocol_context是协议记录，current_plan是共享控制记录，不是新的传感器读数。local_applied仅代表本端执行，其他节点的回执不能替代它。
+组级资源计算及A提出方案需要实际收到的对端资源快照；可request_peer_resources请求，节点自行读取后publish_resource_snapshot回应。calculate_link_options列出全部已知可行区间，不替你选择或执行。B可用send_peer_message发起协作或提出修改意见。
+一个时刻只有一个共同方案：A提出或修订，双方各自审议并准备；A明确执行时核验双方准备并授权，只执行A；B收到授权后自行执行B。准备失败不等于协议接受。当前方案身份由框架固定到你本轮看到的版本，变化会拒绝，不能猜ID或替换业务参数。
+最低保障目标是语音满足率至少95%、视频至少2Mbps。语音满足率=voice_delivered_mbps/voice_demand_mbps；视频单位Mbps。期望视频5Mbps属于质量目标，最低保障恢复与期望质量分别记录。
+finish solved表示已主动观测核验最低保障达到；quality_status可报告desired_reached/degraded_acceptable/not_assessed。protocol_disposition可报告completed/deferred/abandoned/not_required。结束本地任务不代表共同方案双方执行完成；采样覆盖由观察器另行记录。配置后旧观测失效，继续配置或finish前必须主动复采。
+等待时明确调用wait_for_collaboration并说明awaited。正常停止却不调用工具属于未提交动作，不会自动替你声明等待或任务完成。每轮只选一个原生工具，工具成功不等于业务成功，消息不自动接受/执行方案。
+知识仅参考。你可依据事实结束unresolved或needs_resources；不需要为了得到成功结论继续无意义操作。
+'''
+
+def structured_catalog(state):
+    import copy
+    result={name:(description,copy.deepcopy(schema)) for name in state['available_tools'] for description,schema in [CAT[name]]}
+    for name in ('review_group_plan','revise_group_plan','execute_group_plan','read_group_plan'):
+        if name not in result:continue
+        description,schema=result[name]
+        schema['properties'].pop('plan_id',None)
+        if 'plan_id' in schema['required']:schema['required'].remove('plan_id')
+        result[name]=('作用于本轮protocol_context中的当前方案；方案ID/hash由框架绑定，变化会拒绝。'+description,schema)
+    if 'calculate_link_options' in result and not state['peer_resource_snapshot_available']:
+        result['calculate_link_options'][1]['properties']['scope']['enum']=['local']
+    if 'finish' in result:
+        description,schema=result['finish'];schema['properties'].update(quality_status={'type':'string','enum':['desired_reached','degraded_acceptable','not_assessed']},protocol_disposition={'type':'string','enum':['completed','deferred','abandoned','not_required']})
+        result['finish']=('结束本地任务；solved对应主动观测已核验最低保障；期望质量quality_status和协议protocol_disposition分别报告。至少一次当前有效观测即可提交，采样次数另计分；执行后须主动复采。',schema)
+    return result
