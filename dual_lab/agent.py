@@ -15,10 +15,13 @@ def failure_identity(folder):
     raise RuntimeError('node identity event missing; preserve failure for explicit recovery')
 
 def run_job(args,client,job):
-    cid=job['group_task_id'];node=args.node;boot=uuid.uuid4().hex
-    folder=args.root/'runs'/cid/node;ev=Evidence(folder);ledger=TaskLedger(folder,ev);ledger.enqueue({'group_task_id':cid,**job['goal']});ledger.activate_next()
+    cid=job['group_task_id'];node=args.node;boot=args.boot
+    folder=args.root/'runs'/cid/node
+    if job.get('activation',1)>1:folder=folder/('activation_'+str(job['activation']))
+    ev=Evidence(folder);ledger=TaskLedger(folder,ev);ledger.enqueue({'group_task_id':cid,'activation':job.get('activation',1),**job['goal']});ledger.activate_next()
     ev.add('node_identity',node,{'hostname':__import__('socket').gethostname(),'node_id':node,'boot_id':boot,'group_task_id':cid,'task':ledger.identity()})
     base={'case_id':cid,'boot_id':boot}
+    request_prefix=boot+':'+cid+':activation:'+str(job.get('activation',1))
     r=client.call({'op':'register',**base});
     if not r.get('registered'):raise RuntimeError(r)
     config={'models':{'edge':{'model':'gemma4-e2b:latest','base_url':args.model_url}},'edge_context':65536,'edge_output_tokens':16384,'edge_output_tokens_max':32768,'edge_length_retry':True,'edge_thinking':True,'edge_request_timeout_seconds':900,'request_timeout_seconds':180,'response_retry_attempts':1,'transport_retry_attempts':3,'transport_retry_delays':[1,3]}
@@ -28,9 +31,9 @@ def run_job(args,client,job):
     initial={'group_task_id':cid,'node_id':node,'goal':job['goal'],'cloud_available':False}
     messages=[{'role':'system','content':instructions},{'role':'user','content':json.dumps(initial,ensure_ascii=False)}]
     cursor=0;lastobs=None;started=time.monotonic();status='budget_ended';template_seen=False;guard_context={}
-    for step in range(64):
-        if time.monotonic()-started>3600:status='observation_window_ended';break
-        inbox=client.call({'op':'tool',**base,'name':'read_peer_events','arguments':{'after_sequence':cursor},'request_id':boot+':inbox:'+str(step)})
+    for step in range(job.get('remaining_decisions',64)):
+        if time.monotonic()-started>job.get('remaining_seconds',3600):status='observation_window_ended';break
+        inbox=client.call({'op':'tool',**base,'name':'read_peer_events','arguments':{'after_sequence':cursor},'request_id':request_prefix+':inbox:'+str(step)})
         if inbox.get('ok') and inbox['result']['messages']:
             rows=inbox['result']['messages'];cursor=inbox['result']['cursor']
             ev.add('peer_messages_delivered_to_model',node,{'message_ids':[x['message_id'] for x in rows],'messages':rows})
@@ -44,7 +47,7 @@ def run_job(args,client,job):
             arguments['observation_id']=lastobs
         if action in ('read_peer_events','wait_peer_event') and 'after_sequence' not in arguments:arguments['after_sequence']=cursor
         ev.add('framework_identity_binding',node,{'model_arguments':value['arguments'],'effective_arguments':arguments,'business_values_rewritten':False})
-        rid=boot+':decision:'+str(step)
+        rid=request_prefix+':decision:'+str(step)
         if action=='retrieve_knowledge':result={'ok':True,'result':library.search(arguments['query'])}
         elif action=='get_report_template':
             template_seen=True;result={'ok':True,'result':json.loads((args.root/'vendor/templates/capability_gap_report.json').read_text(encoding='utf-8-sig'))}
@@ -71,16 +74,19 @@ def run_job(args,client,job):
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('--root',type=Path,default=ROOT);p.add_argument('--node',choices=['A','B'],required=True);p.add_argument('--url',default='http://127.0.0.1:18933');p.add_argument('--model-url',required=True);a=p.parse_args()
+    a.boot=uuid.uuid4().hex
     auth=json.loads((a.root/'auth.local.json').read_text());client=Client(a.url,auth[a.node]);seen=set()
     while True:
         assignment=client.call({'op':'job'})
         if assignment.get('stop'):break
         job=assignment.get('job')
-        if not job or job['group_task_id'] in seen:time.sleep(2);continue
-        seen.add(job['group_task_id'])
+        key=(job['group_task_id'],job.get('activation',1)) if job else None
+        if not job or key in seen:time.sleep(2);continue
+        seen.add(key)
         try:run_job(a,client,job)
         except Exception as e:
             folder=a.root/'runs'/job['group_task_id']/a.node
+            if job.get('activation',1)>1:folder=folder/('activation_'+str(job['activation']))
             write_json(folder/'failure.json',{'type':type(e).__name__,'error':str(e),'traceback':traceback.format_exc()})
             # The registered boot ID is kept in the first local identity event.
             identity=failure_identity(folder)

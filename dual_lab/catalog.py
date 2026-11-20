@@ -6,7 +6,7 @@ CAT={
  'read_sensor_adapter':('主动读取本节点接口、资源、配置、业务原始测量；不会给出对端私有状态或异常结论。',obj({})),
  'record_finding':('记录模型自己依据观测作出的发现；不替模型判定。',obj({**ID,'has_problem':BOOL,'problem_type':S})),
  'read_peer_catalog':('获取对端身份和能力；没有实时资源读数。',obj({})),
- 'send_peer_message':('发送给对端的事实/问题/提议。字段可自由组织；不执行对端操作。',obj({'payload':{'type':'object','additionalProperties':True}})),
+ 'send_peer_message':('发送给对端的事实/问题/提议。requires_response=true表示新的协作请求，可唤醒已完成普通任务的对端；不执行对端操作。',obj({'payload':{'type':'object','additionalProperties':True},'requires_response':BOOL},['payload'])),
  'read_peer_events':('读取对端已经发送的消息与计划通知；消息不自动执行。',obj({'after_sequence':{'type':'integer'}},[])),
  'wait_peer_event':('有界等待对端事件；休眠10秒再读，减少无进展推理。',obj({'after_sequence':{'type':'integer'}},[])),
  'configure_local_rate':('仅修改本节点视频速率上限2..5Mbps；不切换链路，不修改对端。',obj({**ID,'video_rate_mbps':NUM})),
@@ -27,6 +27,7 @@ SYSTEM='''你是通信现场的端侧自主智能体，使用本机工具观察�
 持续调查业务是否满足既定目标；需主动读取连续传感器数据，观察窗口为双方各至少4次主动采样。对端可能较慢，可有界等待事件。
 已有工具能解决时自主组织；跨端配置需共同计划：提议/接受，双方各准备，A选择授权，然后双方各自执行。提议、接受、准备、授权均不等于实际执行。收到消息不意味着必须照做。
 每次配置后须重新主动采样再继续配置或结束。过期观测/准备以工具真实拒绝为准，你自己决定后续调查或修订。未知写结果先查询原请求，不盲重放。
+finish只结束当前本地任务；服务继续接收新的协作提案，并以新的本地任务激活。所有任务共用本场景的决策和时间预算；失败任务不会因消息自动重开。
 模型自己判断是否异常、如何组合工具、是否协作、是否结束；可调用record_finding记录判断。知识仅参考，不覆盖当前真实观测。
 业务目标为语音满足率至少95%、视频至少2Mbps，期望5Mbps；视频可在2..5内降级。不要因工具返回成功就声称任务完成。
 工具目录及参数是公开通用契约。只输出一个action及arguments，reason可选；调用封装与请求身份由框架处理。

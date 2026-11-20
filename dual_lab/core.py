@@ -38,7 +38,8 @@ class Plant:
                           'backup':{'physical_up':True,'enabled':False,'channel':'c2','capacity_mbps':6.}}} for n in ('A','B')}
         case={'id':cid,'fixture':label,'nodes':nodes,'observations':{},'messages':[],
               'plans':{},'finished':{'A':None,'B':None},'changed':False,'stale_injected':False,
-              'partition':False,'created':time.time(),'findings':[],'executions':[],'boots':{},'peer_delivery':[]}
+              'partition':False,'created':time.time(),'findings':[],'executions':[],'boots':{},'peer_delivery':[],
+              'activations':{'A':1,'B':1},'node_history':{'A':[],'B':[]},'decisions':{'A':0,'B':0},'delivered':{'A':0,'B':0}}
         self.state['cases'][cid]=case;self.state['active']=cid;self.event('case_created','observer',{'case_id':cid,'fixture':label});self.save();return cid
     def case(self,cid):
         require(cid in self.state['cases'],'UNKNOWN_TASK','unknown task');return self.state['cases'][cid]
@@ -66,11 +67,19 @@ class Plant:
     def peer(self,c,n,kind,payload):
         require(not c['partition'],'PEER_UNAVAILABLE','node message channel unavailable')
         message={'message_id':'msg_'+uuid.uuid4().hex[:12],'sender':n,'recipient':'B' if n=='A' else 'A','kind':kind,'payload':clone(payload),'group_task_id':c['id'],'sequence':len(c['messages'])+1}
-        c['messages'].append(message);self.event('message_sent',n,message);return clone(message)
+        c['messages'].append(message);self.event('message_sent',n,message)
+        if kind in ('plan_proposed','plan_response','plan_prepared','plan_authorized','execution_receipt','collaboration_request'):self.activate_for_message(c,message['recipient'],message['message_id'])
+        return clone(message)
+    def activate_for_message(self,c,target,message_id):
+        finished=c['finished'][target]
+        if finished and 'model_submission' in finished and c['decisions'][target]<64 and time.time()-c['created']<3600:
+            c['node_history'][target].append(clone(finished));c['finished'][target]=None;c['activations'][target]+=1
+            self.event('peer_task_enqueued',target,{'case_id':c['id'],'activation':c['activations'][target],'source_message_id':message_id})
     def obs(self,c,n,ident):
         ob=c['observations'].get(ident)
         require(ob and ob['node_id']==n,'OBSERVATION_REQUIRED','reference a real local observation')
         node=c['nodes'][n]
+        require(ob.get('activation',1)==c.get('activations',{}).get(n,1),'STALE_OBSERVATION','observation belongs to previous local task activation')
         require(ob['config_version']==node['config_version'] and ob['environment_revision']==node['environment_revision'],'STALE_OBSERVATION','local state changed; actively sample again')
         require(time.time()-ob['sampled_at']<=1800,'STALE_OBSERVATION','observation expired');return ob
     def plan(self,c,pid):
@@ -88,14 +97,16 @@ class Plant:
         node=c['nodes'][n]
         if name=='read_sensor_adapter':
             self.inject(c);node['sample_sequence']+=1
-            ob={'observation_id':'obs_'+uuid.uuid4().hex[:12],'node_id':n,'group_task_id':c['id'],'sampled_at':time.time(),**clone(node),'measurements':self.measure(c)}
+            ob={'observation_id':'obs_'+uuid.uuid4().hex[:12],'node_id':n,'group_task_id':c['id'],'activation':c['activations'][n],'sampled_at':time.time(),**clone(node),'measurements':self.measure(c)}
             c['observations'][ob['observation_id']]=ob;return ob
         if name=='read_peer_catalog':return {'peer_id':'B' if n=='A' else 'A','capabilities':['local_configuration','group_plan_response','prepare','apply'],'coordinator':'A'}
-        if name=='send_peer_message':return self.peer(c,n,'agent_message',arg['payload'])
+        if name=='send_peer_message':return self.peer(c,n,'collaboration_request' if arg.get('requires_response') else 'agent_message',arg['payload'])
         if name in ('read_peer_events','wait_peer_event'):
             require(not c['partition'],'PEER_UNAVAILABLE','node message channel unavailable')
             rows=[clone(x) for x in c['messages'] if x['recipient']==n and x['sequence']>arg.get('after_sequence',0)]
-            if rows:self.event('messages_received',n,{'case_id':c['id'],'message_ids':[x['message_id'] for x in rows]})
+            if rows:
+                c['delivered'][n]=max(c['delivered'][n],max(x['sequence'] for x in rows))
+                self.event('messages_received',n,{'case_id':c['id'],'message_ids':[x['message_id'] for x in rows]})
             return {'messages':rows,'cursor':len(c['messages'])}
         if name=='record_finding':
             self.obs(c,n,arg['observation_id']);c['findings'].append({'node':n,**clone(arg)});return {'recorded':True}
@@ -152,7 +163,10 @@ class Plant:
             self.obs(c,n,arg['observation_id'])
             require(min(x['sample_sequence'] for x in c['nodes'].values())>=4,'OBSERVATION_WINDOW','both participants must complete four active observations before ending')
             require(arg['status'] in ('solved','unresolved','needs_resources'),'INVALID_ARGUMENTS','unknown finish status')
-            c['finished'][n]={'model_submission':clone(arg),'measurements':self.measure(c),'finished_at':time.time()};return {'local_task_ended':True,'model_status':arg['status']}
+            c['finished'][n]={'model_submission':clone(arg),'measurements':self.measure(c),'finished_at':time.time()}
+            pending=[m for m in c['messages'] if m['recipient']==n and m['sequence']>c['delivered'][n] and m['kind']!='agent_message']
+            if pending:self.activate_for_message(c,n,pending[0]['message_id'])
+            return {'local_task_ended':True,'model_status':arg['status']}
         raise Fault('UNKNOWN_TOOL',name)
     def rpc(self,actor,data):
         with self.lock:
@@ -180,13 +194,14 @@ class Plant:
                 if not cid:return {'job':None}
                 c=self.case(cid)
                 if c['finished'][actor]:return {'job':None}
-                return {'job':{'group_task_id':cid,'node_id':actor,'goal':GOAL,'cloud_available':False}}
+                return {'job':{'group_task_id':cid,'node_id':actor,'goal':GOAL,'cloud_available':False,'activation':c.get('activations',{}).get(actor,1),'remaining_decisions':64-c.get('decisions',{}).get(actor,0),'remaining_seconds':max(0,3600-(time.time()-c['created']))}}
             c=self.case(data['case_id'])
             if op=='register':
                 boot=data['boot_id'];prior=c['boots'].get(actor)
                 require(not prior or prior==boot,'EXPLICIT_RECOVERY_REQUIRED','previous node boot already registered; explicit recovery needed');c['boots'][actor]=boot;self.save();return {'registered':actor}
             require(c['boots'].get(actor)==data.get('boot_id'),'STALE_BOOT','node boot identity mismatch')
             if op=='trace':
+                c['decisions'][actor]+=1
                 self.event('model_turn',actor,{k:v for k,v in data.items() if k not in ('op','boot_id')});self.save();return {'recorded':True}
             if op=='runtime_end':c['finished'][actor]={'runtime_status':data['reason']};self.save();return {'ended':True}
             if op=='request_status':
@@ -210,6 +225,7 @@ class Plant:
         return {'case_id':c['id'],'fixture':c['fixture'],'measurements':m,'business_target_met':solved,'full_dual_plan_ids':full,
                 'dual_execution_observed':bool(full),'messages_sent':len(c['messages']),'node_results':clone(c['finished']),
                 'model_turns':model_turns,'model_findings':clone(c['findings']),'local_rate_writes':local_writes,
+                'node_task_history':clone(c.get('node_history',{})),'node_activations':clone(c.get('activations',{})),
                 'restoration_verified':c['fixture']!='T00' and solved and bool(full or local_writes),
                 'normal_unnecessary_writes':len(c['executions'])+local_writes if c['fixture']=='T00' else None,
                 'correct_solved_confirmation':{n:bool(x and x.get('model_submission',{}).get('status')=='solved' and solved) for n,x in c['finished'].items()},

@@ -1,18 +1,17 @@
-"""Give each native grammar alternative its complete public object contract.
+"""Flat native action/arguments syntax; per-tool semantics are checked on execution.
 
-The original 1.1.2 transport is retained unchanged. Its original schema placed
-required/type at the root but only properties in oneOf alternatives. Some native
-grammar implementations select an alternative before applying root constraints.
-This experimental adapter repeats the full requirements inside every alternative.
-It does not repair responses or select actions/arguments.
+Original transport and vendor bytes stay unchanged. Public catalog keeps each
+tool's complete schema. This avoids depending on conditional native grammar
+support; it does not repair outputs, suppress model EOS or select business actions.
 """
 from collab_lab import providers as transport
 
 def complete_decision_schema(actions,schemas=None):
-    branches=[]
-    for name in actions:
-        branches.append({'type':'object','properties':{'action':{'type':'string','enum':[name]},'arguments':(schemas or {})[name],'reason':{'type':'string'}},'required':['action','arguments'],'additionalProperties':False})
-    return {'oneOf':branches}
+    # Flat root contract is supported by native JSON grammar. Per-tool required
+    # business arguments remain in the public catalog and execution validation.
+    properties={}
+    for schema in (schemas or {}).values():properties.update(schema.get('properties',{}))
+    return {'type':'object','properties':{'action':{'type':'string','enum':list(actions)},'arguments':{'type':'object','properties':properties,'additionalProperties':False},'reason':{'type':'string'}},'required':['action','arguments'],'additionalProperties':False}
 
 # All users of this module are isolated node processes; original vendor bytes stay immutable.
 transport.decision_schema=complete_decision_schema
