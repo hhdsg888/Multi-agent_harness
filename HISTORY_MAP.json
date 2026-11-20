@@ -1,0 +1,127 @@
+{
+  "scope": "Only runtime architecture is mapped; operation and experimental scripts are intentionally excluded.",
+  "old_to_new": [
+    {
+      "old_commit": "43ff3fb50a18abd747ae131d94b1161e2fe24eae",
+      "new_runtime_commit": "318217a9ec7e464d630e5533a82db0757d419739",
+      "revision": "r1",
+      "runtime_bytes_unchanged": true
+    },
+    {
+      "old_commit": "9ef695922e9fa028ea6f1b0e56620c1e79877af0",
+      "new_runtime_commit": "129fbba4a413740cc9d7f6f559bb464777f44383",
+      "revision": "r2",
+      "runtime_bytes_unchanged": true
+    },
+    {
+      "old_commit": "906cb085506670e5efcdd56a115644aee1ed0a0d",
+      "new_runtime_commit": "6e36db07b5e88fb6fa8e0e1dbaadc982e2f6f8a0",
+      "revision": "r3",
+      "runtime_bytes_unchanged": true
+    },
+    {
+      "old_commit": "1255a661c3fa919bf5dc59a360824d788e7cbffc",
+      "new_runtime_commit": "b727336913bf4512f654a0939b211a3b707920b0",
+      "revision": "r4",
+      "runtime_bytes_unchanged": true
+    },
+    {
+      "old_commit": "d0ea88ebc2c73877f50258061c0da48ac4789401",
+      "new_runtime_commit": "4a359ad2253ed546698b7f362361cfdd3c1618f8",
+      "revision": "r5",
+      "runtime_bytes_unchanged": true
+    },
+    {
+      "old_commit": "98ec88d47cd82290bea8275db19346a5f46fbfc1",
+      "new_runtime_commit": "a5f86890ff9c11f83285ab9fe6389466a19991dd",
+      "revision": "r6",
+      "runtime_bytes_unchanged": true
+    },
+    {
+      "old_commit": "7f18c7c50f83eae017247a04a6d359ace5d793c5",
+      "new_runtime_commit": "5e90ca786d6a0757133de940d5d507f159e9bee2",
+      "revision": "r7",
+      "runtime_bytes_unchanged": true
+    },
+    {
+      "old_commit": "b0dbb0948b58dc72611a4f03ed39f898ba8884c3",
+      "new_runtime_commit": "c7f32470dc0ffeffc4890fb1b26ef278ef80a6cd",
+      "revision": "r8",
+      "runtime_bytes_unchanged": true
+    },
+    {
+      "old_commit": "3e5f17a2fe78bd0b092029ee512f1a4d3aa77bc3",
+      "new_runtime_commit": "3ebd087aa573e332da1593ef90bc0cbd194772ba",
+      "revision": "r9",
+      "runtime_bytes_unchanged": true
+    },
+    {
+      "old_commit": "61f14e5f3db0caf5269309f4fca6c1f5acb24c57",
+      "new_runtime_commit": "41ffdf023edb561af4f3565f6e0f7cfcac669834",
+      "revision": "r10",
+      "runtime_bytes_unchanged": true
+    },
+    {
+      "old_commit": "b3f705e51504ae6eb8a0087dd839ba8ba31d30e0",
+      "new_runtime_commit": "5abc8e06ea10c45118c713a4a01106583716d45a",
+      "revision": "r11",
+      "runtime_bytes_unchanged": true
+    },
+    {
+      "old_commit": "de2bbb8fda1a5bba1d5162508a724a7d96a109c1",
+      "new_runtime_commit": "fcbc4c1c19a04d66436e9b0e86594249ac62b6ba",
+      "revision": "r12",
+      "runtime_bytes_unchanged": true
+    },
+    {
+      "old_commit": "31bb206a65bbb82dcf9b954670bfe56be61bc08f",
+      "new_runtime_commit": "574b045ca5fe85dba220191e81ea70e418c97fcf",
+      "revision": "r13",
+      "runtime_bytes_unchanged": true
+    },
+    {
+      "old_commit": "169a3243a89f7d5bf2c4e808998ab9b40df5ef08",
+      "new_runtime_commit": "5ed0db28da8d173b512443afbd407c7a91b50035",
+      "revision": "r14",
+      "runtime_bytes_unchanged": true
+    },
+    {
+      "old_commit": "87003e6e3a078ea9079c6133b88ea27ab8e9725c",
+      "new_runtime_commit": "bbfd8ec4241827cec2ec84f50570bc8f105d2c76",
+      "revision": "r15",
+      "runtime_bytes_unchanged": true
+    },
+    {
+      "old_commit": "2b5cdc4434338d439058d8818fe21b85eee76198",
+      "new_runtime_commit": "bbfd8ec4241827cec2ec84f50570bc8f105d2c76",
+      "revision": "r15",
+      "runtime_bytes_unchanged": true
+    },
+    {
+      "old_commit": "4fe1e1454c5bbcbbfe8d3caa6d9180be1c3221fc",
+      "new_runtime_commit": "bbfd8ec4241827cec2ec84f50570bc8f105d2c76",
+      "revision": "r15",
+      "runtime_bytes_unchanged": true
+    },
+    {
+      "old_commit": "e07291dbeb22c9f871f4ee64dcf41cb90e896ed7",
+      "new_runtime_commit": "bbfd8ec4241827cec2ec84f50570bc8f105d2c76",
+      "revision": "r15",
+      "runtime_bytes_unchanged": true
+    },
+    {
+      "old_commit": "e8b09ce11dfa31475bb3179a065cf0a6072242a3",
+      "new_runtime_commit": "bbfd8ec4241827cec2ec84f50570bc8f105d2c76",
+      "revision": "r15",
+      "runtime_bytes_unchanged": true
+    },
+    {
+      "old_commit": "e59ef2b3a150298ef23b4c65cc3f44e78cab000e",
+      "new_runtime_commit": "bbfd8ec4241827cec2ec84f50570bc8f105d2c76",
+      "revision": "r15",
+      "runtime_bytes_unchanged": true
+    }
+  ],
+  "removed_auxiliary_branch": "codex/historical-assets",
+  "r13_note": "Original complete package was not retained; this was and remains a disclosed reconstruction."
+}

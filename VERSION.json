@@ -1,8 +1,7 @@
 {
   "revision": "r15",
-  "scope": "runtime architecture and pinned dependencies only",
-  "original_commit": "87003e6e3a078ea9079c6133b88ea27ab8e9725c",
-  "origin": "original runtime source retained byte-for-byte",
+  "scope": "runtime architecture only",
+  "base_runtime_tag": "r15",
   "core_file_sha256": {
     "dual_lab/__init__.py": "a1327b07202fdc23fcc3cde0826261f57f3fbd8f044791274f52dfb0ade10869",
     "dual_lab/adapter.py": "39d3609765cb8da15d32549bc103f4d6a72de2976bc82c653037749695d61c42",

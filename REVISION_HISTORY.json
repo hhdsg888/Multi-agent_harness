@@ -1,0 +1,92 @@
+[
+  {
+    "revision": "r1",
+    "old_commit": "43ff3fb50a18abd747ae131d94b1161e2fe24eae",
+    "origin": "original runtime source retained byte-for-byte",
+    "new_commit": "318217a9ec7e464d630e5533a82db0757d419739"
+  },
+  {
+    "revision": "r2",
+    "old_commit": "9ef695922e9fa028ea6f1b0e56620c1e79877af0",
+    "origin": "original runtime source retained byte-for-byte",
+    "new_commit": "129fbba4a413740cc9d7f6f559bb464777f44383"
+  },
+  {
+    "revision": "r3",
+    "old_commit": "906cb085506670e5efcdd56a115644aee1ed0a0d",
+    "origin": "original runtime source retained byte-for-byte",
+    "new_commit": "6e36db07b5e88fb6fa8e0e1dbaadc982e2f6f8a0"
+  },
+  {
+    "revision": "r4",
+    "old_commit": "1255a661c3fa919bf5dc59a360824d788e7cbffc",
+    "origin": "original runtime source retained byte-for-byte",
+    "new_commit": "b727336913bf4512f654a0939b211a3b707920b0"
+  },
+  {
+    "revision": "r5",
+    "old_commit": "d0ea88ebc2c73877f50258061c0da48ac4789401",
+    "origin": "original runtime source retained byte-for-byte",
+    "new_commit": "4a359ad2253ed546698b7f362361cfdd3c1618f8"
+  },
+  {
+    "revision": "r6",
+    "old_commit": "98ec88d47cd82290bea8275db19346a5f46fbfc1",
+    "origin": "original runtime source retained byte-for-byte",
+    "new_commit": "a5f86890ff9c11f83285ab9fe6389466a19991dd"
+  },
+  {
+    "revision": "r7",
+    "old_commit": "7f18c7c50f83eae017247a04a6d359ace5d793c5",
+    "origin": "original runtime source retained byte-for-byte",
+    "new_commit": "5e90ca786d6a0757133de940d5d507f159e9bee2"
+  },
+  {
+    "revision": "r8",
+    "old_commit": "b0dbb0948b58dc72611a4f03ed39f898ba8884c3",
+    "origin": "original runtime source retained byte-for-byte",
+    "new_commit": "c7f32470dc0ffeffc4890fb1b26ef278ef80a6cd"
+  },
+  {
+    "revision": "r9",
+    "old_commit": "3e5f17a2fe78bd0b092029ee512f1a4d3aa77bc3",
+    "origin": "original runtime source retained byte-for-byte",
+    "new_commit": "3ebd087aa573e332da1593ef90bc0cbd194772ba"
+  },
+  {
+    "revision": "r10",
+    "old_commit": "61f14e5f3db0caf5269309f4fca6c1f5acb24c57",
+    "origin": "original runtime source retained byte-for-byte",
+    "new_commit": "41ffdf023edb561af4f3565f6e0f7cfcac669834"
+  },
+  {
+    "revision": "r11",
+    "old_commit": "b3f705e51504ae6eb8a0087dd839ba8ba31d30e0",
+    "origin": "original runtime source retained byte-for-byte",
+    "new_commit": "5abc8e06ea10c45118c713a4a01106583716d45a"
+  },
+  {
+    "revision": "r12",
+    "old_commit": "de2bbb8fda1a5bba1d5162508a724a7d96a109c1",
+    "origin": "original runtime source retained byte-for-byte",
+    "new_commit": "fcbc4c1c19a04d66436e9b0e86594249ac62b6ba"
+  },
+  {
+    "revision": "r13",
+    "old_commit": "31bb206a65bbb82dcf9b954670bfe56be61bc08f",
+    "origin": "reconstructed from retained material",
+    "new_commit": "574b045ca5fe85dba220191e81ea70e418c97fcf"
+  },
+  {
+    "revision": "r14",
+    "old_commit": "169a3243a89f7d5bf2c4e808998ab9b40df5ef08",
+    "origin": "original runtime source retained byte-for-byte",
+    "new_commit": "5ed0db28da8d173b512443afbd407c7a91b50035"
+  },
+  {
+    "revision": "r15",
+    "old_commit": "87003e6e3a078ea9079c6133b88ea27ab8e9725c",
+    "origin": "original runtime source retained byte-for-byte",
+    "new_commit": "bbfd8ec4241827cec2ec84f50570bc8f105d2c76"
+  }
+]
