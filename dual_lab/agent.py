@@ -39,7 +39,7 @@ def await_task(client,base,cursor,context,observation_id,seconds=180,sleep=time.
     return state
 
 def run_job(args,client,job):
-    if job.get('task_revision')=='r15':
+    if job.get('task_revision') in ('r15','r16'):
         from .flexible import run_flexible_job
         return run_flexible_job(args,client,job)
     cid=job['group_task_id'];node=args.node;boot=args.boot

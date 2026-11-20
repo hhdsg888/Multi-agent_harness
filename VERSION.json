@@ -1,21 +1,21 @@
 {
-  "revision": "r15",
+  "revision": "r16",
   "scope": "runtime architecture only",
   "base_runtime_tag": "r15",
   "core_file_sha256": {
     "dual_lab/__init__.py": "a1327b07202fdc23fcc3cde0826261f57f3fbd8f044791274f52dfb0ade10869",
     "dual_lab/adapter.py": "39d3609765cb8da15d32549bc103f4d6a72de2976bc82c653037749695d61c42",
-    "dual_lab/agent.py": "bde32ca529c8279e6bb679f3da37c6a2421e5b99bbe00e41f497d29a24485b0b",
+    "dual_lab/agent.py": "69fea758a6f8a6b97470b2c1d4dbcd4cb1bb5d78cd179eb43e7150ea52ce77b1",
     "dual_lab/catalog.py": "b621bdd96884cc421d48a5407d15bb6ac3d756951a153e20805c971d1622381b",
     "dual_lab/client.py": "c43d313e3768bc3cfa5a379795b6c77d02e13e1862bb0b50b49e19ac1a06900c",
-    "dual_lab/core.py": "4f7e42237c9c5a2ffd10c1105f3bcf70ccfad9a0a45b044ef42c5bf555388af2",
+    "dual_lab/core.py": "2c825d184a2eb409427a357adcd136e8f44a8f303c473c20c4edec198644d71d",
     "dual_lab/feasibility.py": "ecad31193911217ad57721c67d8d8ac94b8ae697018ba210dcd006a2486a05df",
-    "dual_lab/flexible.py": "d2ff3a47332cbf5944cb409be4c5d516960739d868d8988cc71fa6e4c7a97e6e",
+    "dual_lab/flexible.py": "37958558817e59e9c97b842be544a710f24b280f8396ed19905037dfb0c44840",
     "dual_lab/memory.py": "e5f9520b5298b1da63ba14c5aba088469fdfaebef48641c110aa2473f5d40a8e",
-    "dual_lab/policy.py": "bdd952056244249aa379a12cff4c3ca05172533e2659f8b04066b06811493561",
-    "dual_lab/protocol.py": "4e21b3286c290662ca65e23ab67b1a1389e81f1fca095e32271e6fe1fc2a63d7",
+    "dual_lab/policy.py": "36fefa0271d7d5ee4023c45e37e4411988860f00eedbc31b49288d453584eaf0",
+    "dual_lab/protocol.py": "065468afa5e3aab3630f27ccb52e56574133695ee1e9c4867bdfef8a4fa774d1",
     "dual_lab/service.py": "3869baaa7734ea7955fd2a406045862af2d8145a450bba0de152715572fffe7a",
-    "dual_lab/tasks.py": "e9bfdb158b121ca4a3d4f6a016854371d20f5625a32b2803b46614a4464b3038",
+    "dual_lab/tasks.py": "3a35a7153b8e9a7bc13662283a9674c845011e99136d815c7e720adae3bc19c1",
     "dual_lab/validation.py": "cedb8dd7d824401dfd1334b01a8d696df25faf6673e8330c56e8132e9f835f48",
     "vendor/collab_lab/__init__.py": "a8a46fc008744722e5266f80693fee85799ebf8320f54f62b38fd425ea42f1a4",
     "vendor/collab_lab/__main__.py": "460abef4b06bffb5817b4927885e587d5865340acdd0055efd458f927ebb36df",
@@ -57,5 +57,10 @@
     "vendor/strategies/strategies.json": "419de74d63985e613e5b31991dae34f862ea7874dd719335b47cfaaf7fc6f752",
     "vendor/templates/capability_gap_report.json": "0c4129111887dbb154fd1ac293c01bdbfcdde41b13f95e9b19e4e1240e9f9f4f",
     "vendor/toolchain/current.json": "68e281a29a5f713a743ebb4ebd8f2f0858069d6e16121573beebedf0b1f73cc4"
-  }
+  },
+  "changes": [
+    "durable authenticated tool receipts with stable advisory task provenance",
+    "explicit peer exit facts without closure-only reactivation",
+    "unresolved/needs_resources may record unavailable observation; solved retains execution verification"
+  ]
 }

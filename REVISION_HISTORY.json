@@ -88,5 +88,11 @@
     "old_commit": "87003e6e3a078ea9079c6133b88ea27ab8e9725c",
     "origin": "original runtime source retained byte-for-byte",
     "new_commit": "bbfd8ec4241827cec2ec84f50570bc8f105d2c76"
+  },
+  {
+    "revision": "r16",
+    "base_runtime_tag": "r15",
+    "runtime_tag": "r16",
+    "origin": "receipt attribution and explicit task-closure implementation; historical runtime tags unchanged"
   }
 ]

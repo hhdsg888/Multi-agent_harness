@@ -22,6 +22,7 @@ from collab_lab.rag import RagLibrary
 from .adapter import NodeProviders
 from .catalog import CAT, EXECUTION_DESCRIPTION, current_measured_plan_options, obj, S, task_catalog
 from .memory import WorkingMemory
+from .policy import receipt_safe
 from .validation import model_history, validate
 
 SYSTEM_R15 = '''你是通信现场的自主智能体。A兼任中心协调者，维护共同方案；B可主动提出建议、独立接受或拒绝；双方分别执行自己的配置。
@@ -122,11 +123,13 @@ def run_local_command(root, workspace, arguments, receipt_folder, remaining):
 def progress_context(context):
     """Exclude message IDs, sample IDs and TTL refreshes from progress identity."""
     plan = context.get('current_plan') or {}
-    return {'observation': context.get('local_observation_valid'),
+    result = {'observation': context.get('local_observation_valid'),
             'peer_resource_snapshot_available': context.get('peer_resource_snapshot_available'),
             'plan': {key: plan.get(key) for key in ('plan_hash', 'accepted', 'authorized', 'applied')},
             'prepared_nodes': sorted(plan.get('ready', {})),
             'channel_available': context.get('channel_available')}
+    if 'peer_task_exit' in context:result['peer_task_exit']=context['peer_task_exit']
+    return result
 
 
 class ProgressGuard:
@@ -145,6 +148,7 @@ class ProgressGuard:
 
 def run_flexible_job(args, client, job):
     cid, node = job['group_task_id'], args.node
+    revision = job.get('task_revision', 'r15')
     activation = job.get('activation', 1)
     folder = args.root / 'runs' / cid / node
     if activation > 1:
@@ -152,7 +156,7 @@ def run_flexible_job(args, client, job):
     ev = Evidence(folder)
     ev.add('node_identity', node, {'hostname': __import__('socket').gethostname(),
                                  'node_id': node, 'boot_id': args.boot, 'group_task_id': cid,
-                                 'activation': activation, 'revision': 'r15'})
+                                 'activation': activation, 'revision': revision})
     base = {'case_id': cid, 'boot_id': args.boot}
     if not client.call({'op': 'register', **base}).get('registered'):
         raise RuntimeError('node registration rejected')
@@ -174,7 +178,13 @@ def run_flexible_job(args, client, job):
                'workspace': str(workspace), 'time_budget_seconds': remaining(), 'max_decisions': None}
     if memory.path.exists():
         initial['working_memory'] = memory.context()
-    messages = [{'role': 'system', 'content': SYSTEM_R15 + '\n你的节点身份：' + node},
+    system = SYSTEM_R15
+    if receipt_safe(job):
+        system += ('\n本版本区分本端退出与共同方案完成。unresolved/needs_resources无需新的有效观测即可实际提交，缺失或过期观测会如实记录。'
+                   'solved仍需真实观测；已接受的本端片段尚未执行时不能报告共同任务完成。'
+                   'node_task_closed仅表示对端本次任务退出，不是执行回执；尚未履行的共同承诺仍会显示。'
+                   '可自行调查、发送协作请求接续、调整未授权方案或明确退出。退出通知本身不会反复唤醒已经结束的任务。')
+    messages = [{'role': 'system', 'content': system + '\n你的节点身份：' + node},
                 {'role': 'user', 'content': json.dumps(initial, ensure_ascii=False)}]
     cursor, lastobs, step, group_calculation, sample_facts = 0, None, 0, None, {}
     status, guard = 'observation_window_ended', ProgressGuard()
@@ -307,5 +317,5 @@ def run_flexible_job(args, client, job):
     memory.record_outcome(status, activation)
     write_json(folder / 'task_graph.json', client.call({'op': 'task_snapshot', **base}))
     write_json(folder / 'result.json', {'status': status, 'elapsed_seconds': time.monotonic() - started,
-                                      'model_calls': provider.counter, 'node_id': node, 'revision': 'r15',
+                                      'model_calls': provider.counter, 'node_id': node, 'revision': revision,
                                       'scenario_window_seconds': 1800, 'model_decision_limit': None})

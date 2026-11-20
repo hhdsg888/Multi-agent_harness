@@ -2,7 +2,7 @@
 import copy,time,uuid
 from .core import Fault,require,GOAL,sha
 from .feasibility import link_options
-from .policy import flexible
+from .policy import flexible,receipt_safe
 
 class StructuredProtocol:
     def __init__(self,plant,case,node):self.p=plant;self.c=case;self.n=node;self.peer='B' if node=='A' else 'A'
@@ -51,6 +51,16 @@ class StructuredProtocol:
             except Fault:pass
         return options
     def active(self):return self.c['plans'].get(self.c.get('active_plan_id'))
+    def peer_exit(self,public):
+        received=self.p.received(self.c,self.n)
+        notices=[m for m in received if m['kind']=='node_task_closed']
+        if not notices:return {}
+        notice=notices[-1]
+        later=any(m['sequence']>notice['sequence'] and m['kind'] not in ('node_task_closed','agent_message') for m in received)
+        commitment=next((r for r in notice['payload']['commitments'] if public and r['plan_id']==public['plan_id'] and r['plan_hash']==public['plan_hash']),None)
+        pending=bool(commitment and commitment['local_accepted'] and self.peer not in public['applied'] and not later)
+        return {'message_id':notice['message_id'],'payload':copy.deepcopy(notice['payload']),
+                'later_peer_activity_received':later,'pending_current_fragment':pending}
     def state(self,ident):
         observation=self.fresh_observation(ident);plan=self.active();available=['read_sensor_adapter','retrieve_knowledge','get_report_template','report_gap']
         owed=self.pending_requests();outgoing=self.outgoing_requests();published=self.own_resources_published(observation)
@@ -105,8 +115,18 @@ class StructuredProtocol:
                 'current_plan_id':plan['plan_id'] if public else None,'current_plan_hash':plan['plan_hash'] if public else None,'current_plan':public,
                 'local_ledger':self.p.local_context(self.c,self.n),'channel_available':channel_available}
         if flexible(self.c):view['remaining_seconds']=max(0,self.c['created']+1800-time.time())
+        if receipt_safe(self.c):
+            if 'finish' not in available:available.append('finish')
+            view['finish_requirements']={'solved':'fresh local observation; accepted local fragments executed; cooperative barrier and post-barrier sample when applicable',
+                                         'unresolved':'explicit model submission; missing or stale observation recorded without fabricating a sample',
+                                         'needs_resources':'explicit model submission; missing or stale observation recorded without fabricating a sample'}
+            view['peer_task_exit']=self.peer_exit(public)
+            if view['peer_task_exit'].get('pending_current_fragment') and 'execution_receipt' in wait_options:
+                wait_options.remove('execution_receipt')
+                available.remove('wait_for_collaboration')
+                if wait_options:available.append('wait_for_collaboration')
         if self.c.get('task_dispatch'):
-            if (self.c.get('task_revision') in ('r14','r15') and observation and peer_observation
+            if (self.c.get('task_revision') in ('r14','r15','r16') and observation and peer_observation
                     and ('offer_group_plan' in available or 'revise_group_plan' in available)):
                 view['plan_calculation_sources'] = {self.n: observation['observation_id'],
                                                     self.peer: peer_observation['observation_id']}
@@ -143,6 +163,10 @@ class StructuredProtocol:
             if model_arguments is not None:
                 require(all(key in arg and arg[key]==value for key,value in model_arguments.items()),'BUSINESS_ARGUMENT_MISMATCH','effective business fields must equal original model arguments')
             if name=='finish' and arg.get('status')=='solved':
+                if receipt_safe(self.c):
+                    require(state['local_observation_valid'],'OBSERVATION_REQUIRED','solved requires a fresh local observation; unresolved/needs_resources may report unavailable evidence')
+                    pending=[r['plan_id'] for r in state['local_ledger']['commitments'] if r['local_accepted'] and not r['local_applied'] and not r['superseded_by_known']]
+                    require(not pending,'LOCAL_EXECUTION_PENDING','accepted local fragments have no execution receipt; choose whether to execute or explicitly close unresolved/needs_resources')
                 barrier=state['task_dispatch']['execution_barrier']
                 if barrier:
                     require(barrier['confirmed'],'EXECUTION_BARRIER_REQUIRED','both execution receipts required before successful collaborative closure')

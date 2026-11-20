@@ -1,7 +1,7 @@
 import copy,hashlib,json,sqlite3,threading,time,uuid
 from pathlib import Path
 from .feasibility import link_options
-from .policy import flexible,window_seconds,decision_limit,budget_open
+from .policy import flexible,receipt_safe,window_seconds,decision_limit,budget_open
 
 def clone(x):return copy.deepcopy(x)
 def sha(x):return hashlib.sha256(json.dumps(x,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
@@ -35,8 +35,8 @@ class Plant:
         require(protocol_mode in ('legacy','structured'),'INVALID_POLICY','unknown protocol mode')
         require(type(event_reactivation) is bool,'INVALID_POLICY','event reactivation must be boolean')
         require(type(task_dispatch) is bool and (not task_dispatch or protocol_mode=='structured'),'INVALID_POLICY','task dispatch requires structured protocol')
-        require(task_revision in ('r11','r12','r13','r14','r15'),'INVALID_POLICY','unknown task revision')
-        require(task_revision!='r15' or task_dispatch,'INVALID_POLICY','r15 requires task dispatch bookkeeping')
+        require(task_revision in ('r11','r12','r13','r14','r15','r16'),'INVALID_POLICY','unknown task revision')
+        require(task_revision not in ('r15','r16') or task_dispatch,'INVALID_POLICY','flexible revisions require task dispatch bookkeeping')
         if self.state['active']:
             prior=self.case(self.state['active']);require(self.case_complete(prior),'ACTIVE_CASE','previous case still active or has deliverable follow-up work')
         cid='group_'+uuid.uuid4().hex[:12]
@@ -80,7 +80,7 @@ class Plant:
         c['messages'].append(message);self.event('message_sent',n,message)
         if kind in ('plan_proposed','plan_response','plan_prepared','plan_prepare_failed','plan_authorized','execution_receipt','resource_snapshot','resource_request','collaboration_request'):self.activate_for_message(c,message['recipient'],message['message_id'])
         return clone(message)
-    def improved_tasks(self,c):return c.get('task_dispatch') and c.get('task_revision') in ('r12','r13','r14','r15')
+    def improved_tasks(self,c):return c.get('task_dispatch') and c.get('task_revision') in ('r12','r13','r14','r15','r16')
     def pending_activation(self,c,node):
         if not self.improved_tasks(c) or c.get('forced_closed') or c['partition'] or not c.get('event_reactivation'):return None
         finished=c['finished'][node]
@@ -108,7 +108,8 @@ class Plant:
             self.event('peer_task_enqueued',target,{'case_id':c['id'],'activation':c['activations'][target],'source_message_id':message_id})
     def unread_control_messages(self,c,node):
         received=set(c.get('received_message_ids',{}).get(node,[]))
-        return [m for m in c['messages'] if m['recipient']==node and m['kind']!='agent_message' and m['message_id'] not in received]
+        informational={'agent_message','node_task_closed'} if receipt_safe(c) else {'agent_message'}
+        return [m for m in c['messages'] if m['recipient']==node and m['kind'] not in informational and m['message_id'] not in received]
     def obs(self,c,n,ident,allow_prior_activation=False):
         ob=c['observations'].get(ident)
         require(ob and ob['node_id']==n,'OBSERVATION_REQUIRED','reference a real local observation')
@@ -289,11 +290,32 @@ class Plant:
                 c['partition']=True;self.event('hidden_peer_partition','observer',{'case_id':c['id']})
             return receipt
         if name=='finish':
-            self.obs(c,n,arg['observation_id'])
+            status=arg['status']
+            require(status in ('solved','unresolved','needs_resources'),'INVALID_ARGUMENTS','unknown finish status')
+            evidence=None
+            if receipt_safe(c) and status!='solved':
+                try:
+                    ob=self.obs(c,n,arg.get('observation_id'))
+                    evidence={'observation_id':ob['observation_id'],'valid':True}
+                except Fault as error:
+                    evidence={'observation_id':arg.get('observation_id'),'valid':False,'error_code':error.code}
+            else:self.obs(c,n,arg['observation_id'])
             enough=node['sample_sequence']>=2 if c.get('change_policy')=='at_start' else min(x['sample_sequence'] for x in c['nodes'].values())>=4
             if c.get('protocol_mode')!='structured':require(enough,'OBSERVATION_WINDOW','required active observation window has not completed')
             require(arg['status'] in ('solved','unresolved','needs_resources'),'INVALID_ARGUMENTS','unknown finish status')
             c['finished'][n]={'model_submission':clone(arg),'measurements':self.measure(c),'finished_at':time.time()}
+            if receipt_safe(c):
+                if evidence is None:evidence={'observation_id':arg['observation_id'],'valid':True}
+                c['finished'][n]['observation_evidence']=evidence
+                closure={'node_id':n,'activation':c['activations'][n],'status':status,
+                         'observation_evidence':clone(evidence),'commitments':self.local_context(c,n)['commitments'],
+                         'meaning':'local task closed; pending fragments are not execution receipts or fulfilled commitments'}
+                if not c['partition']:
+                    notice=self.peer(c,n,'node_task_closed',closure)
+                    c['finished'][n]['peer_notice']={'state':'sent','message_id':notice['message_id']}
+                else:
+                    c['finished'][n]['peer_notice']={'state':'undelivered','error_code':'PEER_UNAVAILABLE'}
+                    self.event('local_task_closure_undelivered',n,{'case_id':c['id'],**closure})
             pending=self.unread_control_messages(c,n) if c.get('event_reactivation') else [m for m in c['messages'] if m['recipient']==n and m['sequence']>c['delivered'][n] and m['kind']!='agent_message']
             if pending:self.activate_for_message(c,n,pending[0]['message_id'])
             return {'local_task_ended':True,'model_status':arg['status']}
@@ -302,7 +324,7 @@ class Plant:
         with self.lock:
             op=data.get('op')
             if actor=='admin':
-                if op=='capabilities':return {'task_dispatch_revision':'r11','task_dispatch_revisions':['r11','r12','r13','r14','r15'],'stable_public_tools':17,'task_context_binding':True,'post_execution_barrier':True,'r15':{'multi_tool_calls':True,'window_seconds':1800,'decision_limit':None,'task_cards':'advisory','local_commands':True}}
+                if op=='capabilities':return {'task_dispatch_revision':'r11','task_dispatch_revisions':['r11','r12','r13','r14','r15','r16'],'stable_public_tools':17,'task_context_binding':True,'post_execution_barrier':True,'r15':{'multi_tool_calls':True,'window_seconds':1800,'decision_limit':None,'task_cards':'advisory','local_commands':True}}
                 if op=='begin_suite':
                     if self.state['active']:require(self.case_complete(self.case(self.state['active'])),'ACTIVE_CASE','previous suite still has live nodes or deliverable follow-up work')
                     self.state.update(suite_done=False,active=None,suite_name=data['name']);self.save();return {'started':data['name']}
@@ -385,7 +407,9 @@ class Plant:
                     if intent.get('scheduler_task_id'):
                         from .tasks import TaskGraph
                         TaskGraph(self,c,actor).wait_result(intent['scheduler_task_id'],'ready',[m['message_id'] for m in inbox['messages']])
-                    self.save();return {'state':'ready',**inbox,'awaited':intent.get('awaited'),'awaited_event_observed':any(m['kind'] in expected for m in inbox['messages'])}
+                    response={'state':'ready',**inbox,'awaited':intent.get('awaited'),'awaited_event_observed':any(m['kind'] in expected for m in inbox['messages'])}
+                    if receipt_safe(c):response['peer_task_closures']=[clone(m) for m in inbox['messages'] if m['kind']=='node_task_closed']
+                    self.save();return response
                 peer='B' if actor=='A' else 'A'
                 peer_wait=waiting[peer]
                 peer_pending=peer_wait and any(m['recipient']==peer and m['sequence']>peer_wait['after_sequence'] for m in c['messages'])
@@ -448,8 +472,10 @@ class Plant:
             if c.get('task_dispatch') and data['name']!='read_peer_events':
                 from .tasks import TaskGraph
                 graph=TaskGraph(self,c,actor)
-                if data.get('task_context_token')==graph.d['context_digest']:
-                    graph.record_tool(data['name'],data['arguments'] if result.get('ok') else data.get('model_arguments',data['arguments']),result,data['request_id'])
+                if receipt_safe(c) or data.get('task_context_token')==graph.d['context_digest']:
+                    arguments=data['arguments'] if result.get('ok') else data.get('model_arguments',data['arguments'])
+                    if receipt_safe(c):graph.record_receipt(data['name'],arguments,result,data['request_id'],data.get('task_context_token'))
+                    else:graph.record_tool(data['name'],arguments,result,data['request_id'])
                     current=graph.d['tasks'].get(graph.d['current_task_id'])
                     result['task_dispatch_outcome']={'task_id':graph.d['current_task_id'],'task_failed':bool(current and current['state']=='failed'),'summary':graph.summary()}
             if data['name'] in ('execute_group_plan','apply_local_plan') and data['arguments'].get('plan_id') in c['plans']:
@@ -478,7 +504,7 @@ class Plant:
                 'service_floor_met':solved,'desired_quality_met':solved and m['video_delivered_mbps']>=GOAL['video_desired_mbps'],
                 'protocol_status':self.protocol_status(c),'sample_sequences':{n:v['sample_sequence'] for n,v in c['nodes'].items()},
                 'sampling_window_compliant':{n:v['sample_sequence']>=2 for n,v in c['nodes'].items()},
-                'task_dispatch_enabled':c.get('task_dispatch',False),
+                'task_dispatch_enabled':c.get('task_dispatch',False),'task_revision':c.get('task_revision','r11'),
                 'subtask_summaries':{n:__import__('dual_lab.tasks',fromlist=['TaskGraph']).TaskGraph(self,c,n).summary() for n in ('A','B')} if c.get('task_dispatch') else {}}
     def protocol_status(self,c):
         p=c['plans'].get(c.get('active_plan_id'))

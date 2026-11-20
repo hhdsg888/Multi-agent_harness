@@ -6,7 +6,7 @@ not enter this module. The graph is persisted inside the plant's SQLite state.
 """
 import copy,time
 from .core import require,sha
-from .policy import flexible,window_seconds,decision_limit
+from .policy import flexible,receipt_safe,window_seconds,decision_limit
 
 TERMINAL={'completed','failed','superseded','closed_by_model_exit'}
 REPEAT_LIMIT=3
@@ -92,7 +92,10 @@ class TaskGraph:
                 if row['state'] in ('ready','waiting'):selected.append(row)
             return row
         own_applied=visible_barrier is not None
-        if own_applied:
+        peer_closed=receipt_safe(self.c) and state.get('peer_task_exit',{}).get('pending_current_fragment',False)
+        if peer_closed:
+            add('RESOLVE_BLOCKED_TASK','peer_exit:'+state['peer_task_exit']['message_id'])
+        elif own_applied:
             barrier=visible_barrier;pid=barrier['plan_id']
             if not barrier['confirmed']:
                 add('WAIT_BOTH_EXECUTIONS',pid+':'+sha(source_ids),waiting='execution_receipt')
@@ -136,8 +139,8 @@ class TaskGraph:
         current=selected[0] if selected else None
         def resolve_wait(blocked):
             key=blocked['task_id']+':'+sha(self.d['wait_failures'][blocked['task_id']])
-            if self.improved and ob is None:return add('OBSERVE_FOR_EXIT',key+':'+str(observation_id))
-            return add('RESOLVE_BLOCKED_TASK',key,deps=[self.d['last_observation_task_id']] if self.improved else [])
+            if self.improved and ob is None and not receipt_safe(self.c):return add('OBSERVE_FOR_EXIT',key+':'+str(observation_id))
+            return add('RESOLVE_BLOCKED_TASK',key,deps=[self.d['last_observation_task_id']] if self.improved and not receipt_safe(self.c) else [])
         if current is None:
             failed_wait=next((r for ident,r in self.d['tasks'].items() if ident in keep and ident in self.d['wait_failures']),None)
             if failed_wait:
@@ -151,10 +154,13 @@ class TaskGraph:
                     row.update(state='superseded',failure_reason='new visible plan revision; no completion inferred')
                 else:row['state']='queued'  # temporarily preempted, not completed or discarded
         self.d['current_task_id']=current['task_id'] if current else None
-        digest=sha({'state':state,'observation_id':observation_id,'activation':activation,'task':current,'wait_failures':self.d['wait_failures']})
+        identity_state={k:v for k,v in state.items() if k!='remaining_seconds'} if receipt_safe(self.c) else state
+        digest=sha({'state':identity_state,'observation_id':observation_id,'activation':activation,'task':current,'wait_failures':self.d['wait_failures']})
         if digest!=self.d['context_digest']:
             self.d['context_revision']+=1;self.d['context_digest']=digest
         card=self.card(current,state) if current else None
+        if receipt_safe(self.c):
+            self.d.setdefault('contexts',{})[digest]={'task_id':current['task_id'] if current else None,'activation':activation}
         self.p.save()
         return {'current_task':card,'context_revision':self.d['context_revision'],'context_token':digest,
                 'execution_barrier':visible_barrier,'shared_budget':{'remaining_decisions':None if flexible(self.c) else max(0,64-self.c['decisions'][self.n]),'deadline':self.c['created']+window_seconds(self.c)},
@@ -177,40 +183,60 @@ class TaskGraph:
             card['completion_condition']='本端read_sensor_adapter实际成功回执；历史观测和口头完成不能替代。' if sample_task else '当前职责的真实工具回执或模型明确退出；业务状态仍由模型判断。'
             card['requires_observation_before_finish']=not state['local_observation_valid']
             card['eligible_finish_statuses']=[] if not state['local_observation_valid'] else ['unresolved','needs_resources'] if self.visible_barrier and not self.visible_barrier['confirmed'] else ['solved','unresolved','needs_resources']
+            if receipt_safe(self.c):
+                pending=any(r['local_accepted'] and not r['local_applied'] and not r['superseded_by_known'] for r in state['local_ledger']['commitments'])
+                success=state['local_observation_valid'] and not pending and not (self.visible_barrier and not self.visible_barrier['confirmed'])
+                card['requires_observation_before_finish']=False
+                card['requires_observation_for_solved']=True
+                card['eligible_finish_statuses']=(['solved'] if success else [])+['unresolved','needs_resources']
+                if row['task_type'] in ('RESOLVE_BLOCKED_TASK','OBSERVE_FOR_EXIT'):
+                    card['instruction']='依赖尚未完成或对端已报告退出；核对实际收到的回执，自主调查、沟通接续或明确提交unresolved/needs_resources。失败结案可注明观测缺失或过期，不需先完成成功核验。'
             card['role']='coordinator' if self.n=='A' else 'resource_owner'
         return card
     def check(self,token):
         require(token and token==self.d['context_digest'],'STALE_TASK_CONTEXT','task or visible protocol context changed after input; no automatic retargeting')
         current=self.d['tasks'].get(self.d['current_task_id'])
         require(current and current['state'] not in TERMINAL,'TASK_NOT_ACTIVE','no active subtask; do not regenerate without a new event')
-    def record_tool(self,action,args,result,request_id):
-        current=self.d['tasks'].get(self.d['current_task_id'])
-        if not current:return
+    def record_receipt(self,action,args,result,request_id,context_token):
+        """Keep every authenticated receipt; attribute only to its submitted card.
+
+        Task cards are advisory. A changed card cannot erase an execution or
+        rejection, nor may a result complete an unrelated replacement card.
+        """
+        binding=self.d.get('contexts',{}).get(context_token,{})
+        task_id=binding.get('task_id') if binding.get('activation')==self.c['activations'][self.n] else None
+        self.d.setdefault('tool_receipts',[]).append({'request_id':request_id,'action':action,
+            'ok':bool(result.get('ok')),'error_code':result.get('error_code'),'context_token':context_token,
+            'task_id':task_id,'activation':self.c['activations'][self.n]})
+        self.record_tool(action,args,result,request_id,task_id=task_id)
+    def record_tool(self,action,args,result,request_id,task_id=...):
+        current=self.d['tasks'].get(self.d['current_task_id'] if task_id is ... else task_id)
+        if not current and not receipt_safe(self.c):return
         self.d['receipt_ids'].append(request_id)
         reviewed=result.get('result',{}).get('review') if isinstance(result.get('result'),dict) else None
         if result.get('ok') or action=='review_group_plan' and reviewed is not None:
             if action=='read_sensor_adapter':
                 kinds={'OBSERVE_LOCAL','OBSERVE_FOR_EXIT','VERIFY_LOCAL_AFTER_WRITE','VERIFY_LOCAL_AFTER_BARRIER'}
-                if current['task_type'] in kinds:
+                if current and current['task_type'] in kinds:
                     self.complete(current,'sensor_receipt',[request_id,result['result']['observation_id']]);self.d['last_observation_task_id']=current['task_id']
-            elif action=='publish_resource_snapshot' and current['task_type'] in ('RESPOND_RESOURCE_REQUEST','PUBLISH_LOCAL_RESOURCES'):
+            elif action=='publish_resource_snapshot' and current and current['task_type'] in ('RESPOND_RESOURCE_REQUEST','PUBLISH_LOCAL_RESOURCES'):
                 self.complete(current,'resource_publication',[request_id,result['result']['message_id']])
-            elif action=='review_group_plan' and current['task_type']=='REVIEW_CURRENT_PLAN':self.complete(current,'independent_review',[request_id])
+            elif action=='review_group_plan' and current and current['task_type']=='REVIEW_CURRENT_PLAN':self.complete(current,'independent_review',[request_id])
             elif action=='execute_group_plan':
-                if current['task_type']=='EXECUTE_LOCAL_FRAGMENT':self.complete(current,'local_execution_receipt',[request_id])
-            elif current['task_type']=='ANALYZE_OR_PROPOSE' and action in ('request_peer_resources','offer_group_plan','revise_group_plan','configure_local_rate'):
+                if current and current['task_type']=='EXECUTE_LOCAL_FRAGMENT':self.complete(current,'local_execution_receipt',[request_id])
+            elif current and current['task_type']=='ANALYZE_OR_PROPOSE' and action in ('request_peer_resources','offer_group_plan','revise_group_plan','configure_local_rate'):
                 self.complete(current,'model_selected_branch',[request_id])
             if action=='configure_local_rate':self.d['last_local_write']={'request_id':request_id,'at':time.time()}
             if action in ('offer_group_plan','revise_group_plan'):self.d['last_local_write']=None
             if action=='finish':
-                if current['task_type'] in ('CLOSE_LOCAL_TASK','ANALYZE_OR_PROPOSE','RESOLVE_DECLINED_PLAN','RESOLVE_BLOCKED_TASK','RECOVER_COORDINATION'):
+                if current and current['task_type'] in ('CLOSE_LOCAL_TASK','ANALYZE_OR_PROPOSE','RESOLVE_DECLINED_PLAN','RESOLVE_BLOCKED_TASK','RECOVER_COORDINATION'):
                     self.complete(current,'explicit_model_finish',[request_id])
                 for row in self.d['tasks'].values():
                     if row['state'] not in TERMINAL:row.update(state='closed_by_model_exit',failure_reason='explicit model exit; dependency not fulfilled')
                 self.d['model_submission']=copy.deepcopy(args)
                 self.d['model_submission_activation']=self.d['activation']
                 self.d.setdefault('model_submissions',[]).append({'activation':self.d['activation'],'arguments':copy.deepcopy(args),'request_id':request_id})
-        else:
+        elif current:
             current['last_error']={'request_id':request_id,'action':action,'error_code':result.get('error_code')}
             key=sha([action,args,result.get('error_code')]);current['failures'][key]=current['failures'].get(key,0)+1
             if not flexible(self.c) and current['failures'][key]>=REPEAT_LIMIT:
