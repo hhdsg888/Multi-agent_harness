@@ -3,8 +3,8 @@ from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
 from .core import Plant,Fault
 
-def serve(root,port):
-    auth=json.loads((root/'auth.local.json').read_text());plant=Plant(root/'state/plant.sqlite3')
+def serve(root,port,state_file='state/plant.sqlite3'):
+    auth=json.loads((root/'auth.local.json').read_text());plant=Plant(root/state_file)
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*a):pass
         def do_POST(self):
@@ -27,4 +27,4 @@ def serve(root,port):
     print(json.dumps({'service':'dual-plant','port':port}),flush=True);server.serve_forever()
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--root',type=Path,default=Path(__file__).resolve().parents[1]);p.add_argument('--port',type=int,default=18933);a=p.parse_args();serve(a.root,a.port)
+    p=argparse.ArgumentParser();p.add_argument('--root',type=Path,default=Path(__file__).resolve().parents[1]);p.add_argument('--port',type=int,default=18933);p.add_argument('--state-file',default='state/plant.sqlite3');a=p.parse_args();serve(a.root,a.port,a.state_file)

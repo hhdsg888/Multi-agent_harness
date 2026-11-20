@@ -27,8 +27,9 @@ class Plant:
         self.db.execute("INSERT OR REPLACE INTO state VALUES('plant',?)",(json.dumps(self.state),));self.db.commit()
     def event(self,kind,actor,data):
         self.db.execute('INSERT INTO events(kind,actor,body) VALUES(?,?,?)',(kind,actor,json.dumps({'time':time.time(),**data},ensure_ascii=False)))
-    def create(self,label):
+    def create(self,label,change_policy='after_samples'):
         require(label in CASES,'UNKNOWN_CASE','unknown fixture')
+        require(change_policy in ('after_samples','at_start'),'INVALID_POLICY','unknown change policy')
         if self.state['active']:
             prior=self.case(self.state['active']);require(all(prior['finished'].values()),'ACTIVE_CASE','previous case still active')
         cid='group_'+uuid.uuid4().hex[:12]
@@ -36,11 +37,13 @@ class Plant:
                  'selected_path':'primary','video_rate_mbps':5.,'background_mbps':0.,
                  'ports':{'primary':{'physical_up':True,'enabled':True,'channel':'c1','capacity_mbps':8.},
                           'backup':{'physical_up':True,'enabled':False,'channel':'c2','capacity_mbps':6.}}} for n in ('A','B')}
-        case={'id':cid,'fixture':label,'nodes':nodes,'observations':{},'messages':[],
+        case={'id':cid,'fixture':label,'change_policy':change_policy,'minimum_samples':2 if change_policy=='at_start' else 4,'nodes':nodes,'observations':{},'messages':[],
               'plans':{},'finished':{'A':None,'B':None},'changed':False,'stale_injected':False,
               'partition':False,'created':time.time(),'findings':[],'executions':[],'boots':{},'peer_delivery':[],
               'activations':{'A':1,'B':1},'node_history':{'A':[],'B':[]},'decisions':{'A':0,'B':0},'delivered':{'A':0,'B':0}}
-        self.state['cases'][cid]=case;self.state['active']=cid;self.event('case_created','observer',{'case_id':cid,'fixture':label});self.save();return cid
+        self.state['cases'][cid]=case;self.state['active']=cid;self.event('case_created','observer',{'case_id':cid,'fixture':label,'change_policy':change_policy})
+        if change_policy=='at_start':self.inject(case)
+        self.save();return cid
     def case(self,cid):
         require(cid in self.state['cases'],'UNKNOWN_TASK','unknown task');return self.state['cases'][cid]
     def measure(self,c):
@@ -52,7 +55,7 @@ class Plant:
         voice=min(.25,capacity);video=min(5.,a['video_rate_mbps'],b['video_rate_mbps'],max(0.,capacity-voice))
         return {'voice_delivered_mbps':voice,'voice_demand_mbps':.25,'video_delivered_mbps':video,'video_demand_mbps':5.}
     def inject(self,c):
-        if c['changed'] or min(x['sample_sequence'] for x in c['nodes'].values())<2:return
+        if c['changed'] or (c.get('change_policy','after_samples')=='after_samples' and min(x['sample_sequence'] for x in c['nodes'].values())<2):return
         c['changed']=True;t=c['fixture'];a,b=c['nodes']['A'],c['nodes']['B']
         if t=='T00':a['ports']['primary']['capacity_mbps']=7.8
         elif t=='T01':a['video_rate_mbps']=1.;a['config_version']+=1
@@ -93,6 +96,33 @@ class Plant:
         self.obs(c,n,ready['observation_id'])
         require(time.time()<ready['expires_at'],'PREPARE_EXPIRED','reservation expired')
     def public_plan(self,p):return clone(p)
+    def semantic_tool(self,c,n,name,arg):
+        """Bundle this actor's bookkeeping. Peer decisions/writes remain separate.
+
+        Outer RPC durably caches the complete receipt, including partial stages.
+        """
+        stages=[];pid=arg.get('plan_id')
+        def stage(action,arguments):
+            value=self.tool(c,n,action,arguments)
+            stages.append({'action':action,'result':clone(value)});return value
+        try:
+            ob={'observation_id':arg.get('observation_id')}
+            if name=='offer_group_plan':
+                p=stage('propose_group_plan',{**ob,'node_actions':arg['node_actions']});pid=p['plan_id']
+                stage('prepare_local_plan',{**ob,'plan_id':pid})
+            elif name=='review_group_plan':
+                stage('respond_group_plan',{**ob,'plan_id':pid,'accept':arg['accept'],'explanation':arg.get('explanation','')})
+                if arg['accept']:stage('prepare_local_plan',{**ob,'plan_id':pid})
+            elif name=='execute_group_plan':
+                p=self.plan(c,pid)
+                if n=='A' and not p['authorized']:stage('authorize_group_plan',{'plan_id':pid})
+                stage('apply_local_plan',{**ob,'plan_id':pid})
+            else:raise Fault('UNKNOWN_TOOL',name)
+            return {'ok':True,'result':{'plan_id':pid,'stages':stages,'plan':self.public_plan(self.plan(c,pid))}}
+        except Fault as e:
+            return {'ok':False,'error_code':e.code,'error':str(e),'result':{'plan_id':pid,'completed_stages':stages,'partial_progress':bool(stages)}}
+        except (KeyError,TypeError,ValueError) as e:
+            return {'ok':False,'error_code':'INVALID_ARGUMENTS','error':str(e),'result':{'plan_id':pid,'completed_stages':stages,'partial_progress':bool(stages)}}
     def tool(self,c,n,name,arg):
         node=c['nodes'][n]
         if name=='read_sensor_adapter':
@@ -161,7 +191,8 @@ class Plant:
             return receipt
         if name=='finish':
             self.obs(c,n,arg['observation_id'])
-            require(min(x['sample_sequence'] for x in c['nodes'].values())>=4,'OBSERVATION_WINDOW','both participants must complete four active observations before ending')
+            enough=node['sample_sequence']>=2 if c.get('change_policy')=='at_start' else min(x['sample_sequence'] for x in c['nodes'].values())>=4
+            require(enough,'OBSERVATION_WINDOW','required active observation window has not completed')
             require(arg['status'] in ('solved','unresolved','needs_resources'),'INVALID_ARGUMENTS','unknown finish status')
             c['finished'][n]={'model_submission':clone(arg),'measurements':self.measure(c),'finished_at':time.time()}
             pending=[m for m in c['messages'] if m['recipient']==n and m['sequence']>c['delivered'][n] and m['kind']!='agent_message']
@@ -176,7 +207,7 @@ class Plant:
                     if self.state['active']:require(all(self.case(self.state['active'])['finished'].values()),'ACTIVE_CASE','previous suite still has live nodes')
                     self.state.update(suite_done=False,active=None,suite_name=data['name']);self.save();return {'started':data['name']}
                 if op=='suite_end':self.state['suite_done']=True;self.save();return {'stopped':True}
-                if op=='create':return {'case_id':self.create(data['fixture'])}
+                if op=='create':return {'case_id':self.create(data['fixture'],data.get('change_policy','after_samples'))}
                 if op=='snapshot':return clone(self.case(data['case_id']))
                 if op=='force_end':
                     c=self.case(data['case_id'])
@@ -194,7 +225,8 @@ class Plant:
                 if not cid:return {'job':None}
                 c=self.case(cid)
                 if c['finished'][actor]:return {'job':None}
-                return {'job':{'group_task_id':cid,'node_id':actor,'goal':GOAL,'cloud_available':False,'activation':c.get('activations',{}).get(actor,1),'remaining_decisions':64-c.get('decisions',{}).get(actor,0),'remaining_seconds':max(0,3600-(time.time()-c['created']))}}
+                goal={**GOAL,'observation_window_per_node':c.get('minimum_samples',4)}
+                return {'job':{'group_task_id':cid,'node_id':actor,'goal':goal,'cloud_available':False,'activation':c.get('activations',{}).get(actor,1),'remaining_decisions':64-c.get('decisions',{}).get(actor,0),'remaining_seconds':max(0,3600-(time.time()-c['created']))}}
             c=self.case(data['case_id'])
             if op=='register':
                 boot=data['boot_id'];prior=c['boots'].get(actor)
@@ -212,7 +244,9 @@ class Plant:
             if row:
                 require(row[0]==fp,'REQUEST_ID_CONFLICT','same request_id with different operation');return json.loads(row[1])
             require('node_id' not in data['arguments'] or data['arguments']['node_id']==actor,'FORBIDDEN','cannot address another node executor')
-            try:result={'ok':True,'result':self.tool(c,actor,data['name'],data['arguments'])}
+            try:
+                if data['name'] in ('offer_group_plan','review_group_plan','execute_group_plan'):result=self.semantic_tool(c,actor,data['name'],data['arguments'])
+                else:result={'ok':True,'result':self.tool(c,actor,data['name'],data['arguments'])}
             except Fault as e:result={'ok':False,'error_code':e.code,'error':str(e)}
             except (KeyError,TypeError,ValueError) as e:result={'ok':False,'error_code':'INVALID_ARGUMENTS','error':str(e)}
             self.event('tool_result',actor,{'case_id':c['id'],'request_id':data['request_id'],'action':data['name'],'arguments':data['arguments'],'response':result})
