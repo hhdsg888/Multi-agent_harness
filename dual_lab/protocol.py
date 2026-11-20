@@ -82,7 +82,7 @@ class StructuredProtocol:
                 if plan and not plan['authorized']:available.append('review_group_plan')
                 if plan and self.n not in plan['applied'] and (plan['authorized'] or self.n=='A' and all(plan['accepted'].get(n) is True and n in plan['ready'] for n in ('A','B'))):available.append('execute_group_plan')
         phase='observation_required' if not observation else 'resource_response_due' if owed else 'execution_or_verification' if plan and plan['authorized'] else 'review_current_plan' if plan else 'planning' if resource_available and self.n=='A' else 'resource_exchange'
-        return {'node_id':self.n,'role':'coordinator' if self.n=='A' else 'resource_owner','phase':phase,'available_tools':available,
+        view={'node_id':self.n,'role':'coordinator' if self.n=='A' else 'resource_owner','phase':phase,'available_tools':available,
                 'local_observation_valid':observation is not None,'peer_resource_snapshot_available':resource_available,'pending_resource_request_ids':owed,
                 'outgoing_resource_request_ids':outgoing,'own_resource_snapshot_current':published,'allowed_wait_targets':wait_options,
                 'local_work':{'observation_required':observation is None,'resource_response_owed':bool(owed),'resource_publication_outdated':bool((owed or outgoing or plan) and not published),
@@ -90,13 +90,41 @@ class StructuredProtocol:
                               'common_plan_owner':'A','peer_can_create_common_plan':self.n=='B'},
                 'current_plan_id':plan['plan_id'] if public else None,'current_plan_hash':plan['plan_hash'] if public else None,'current_plan':public,
                 'local_ledger':self.p.local_context(self.c,self.n),'channel_available':channel_available}
+        if self.c.get('task_dispatch'):
+            from .tasks import TaskGraph
+            prepared=False
+            if plan and self.n in plan['ready']:
+                try:self.p.check_ready(self.c,self.n,plan);prepared=True
+                except Fault:pass
+            view['local_preparation_valid']=prepared
+            view['task_dispatch']=TaskGraph(self.p,self.c,self.n).sync(view,ident)
+        return view
     def check_local(self,ob,fragment):
         port=ob['ports'][fragment['path']];voice=ob['measurements']['voice_demand_mbps']
         require(port['physical_up'],'PHYSICAL_UNAVAILABLE','selected local port physically unavailable')
         require(voice+fragment['video_rate_mbps']<=port['capacity_mbps']-ob['background_mbps'],'LOCAL_RESOURCE_LIMIT','local capacity must cover voice and requested video together')
     def reservation(self,ob,plan):
         return {'node_id':self.n,'observation_id':ob['observation_id'],'plan_hash':plan['plan_hash'],'expires_at':time.time()+1800}
-    def dispatch(self,name,arg):
+    def dispatch(self,name,arg,task_context_token=None,model_arguments=None):
+        if self.c.get('task_dispatch') and name=='read_peer_events':
+            return {'ok':True,'result':self.p.tool(self.c,self.n,name,arg)}
+        if self.c.get('task_dispatch') and name!='read_peer_events':
+            from .tasks import TaskGraph
+            from .catalog import task_catalog
+            from .validation import validate
+            state=self.state(arg.get('observation_id'));graph=TaskGraph(self.p,self.c,self.n)
+            graph.check(task_context_token)
+            catalog=task_catalog();require(name in catalog,'UNKNOWN_TOOL','tool outside stable public contract')
+            error=validate(model_arguments if model_arguments is not None else arg,catalog[name][1])
+            if error:return {'ok':False,'error_code':'INVALID_ARGUMENTS','error':error,'public_argument_schema':catalog[name][1]}
+            if model_arguments is not None:
+                require(all(key in arg and arg[key]==value for key,value in model_arguments.items()),'BUSINESS_ARGUMENT_MISMATCH','effective business fields must equal original model arguments')
+            if name=='finish' and arg.get('status')=='solved':
+                barrier=state['task_dispatch']['execution_barrier']
+                if barrier:
+                    require(barrier['confirmed'],'EXECUTION_BARRIER_REQUIRED','both execution receipts required before successful collaborative closure')
+                    ob=self.fresh_observation(arg.get('observation_id'))
+                    require(ob and ob['sampled_at']>=graph.d['barriers'][barrier['plan_id']]['opened_at'],'POST_BARRIER_OBSERVATION_REQUIRED','actively sample after both execution receipts are confirmed')
         if self.c['partition'] and name in ('offer_group_plan','revise_group_plan','review_group_plan','execute_group_plan','read_group_plan','publish_resource_snapshot','request_peer_resources'):
             raise Fault('PEER_UNAVAILABLE','node message channel unavailable')
         state=self.state(arg.get('observation_id'))

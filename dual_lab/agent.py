@@ -6,7 +6,7 @@ from .adapter import NodeProviders as Providers
 from collab_lab.runtime import TaskLedger,RepetitionGuard
 from collab_lab.rag import RagLibrary
 from .client import Client
-from .catalog import CAT,SYSTEM,STRUCTURED_SYSTEM,stable_catalog
+from .catalog import CAT,SYSTEM,STRUCTURED_SYSTEM,stable_catalog,task_catalog,TASK_SYSTEM
 from .memory import WorkingMemory
 from .validation import validate,model_history
 
@@ -25,6 +25,19 @@ def await_peer(client,base,cursor,call_id,seconds=180,sleep=time.sleep,now=time.
     if state['state']=='waiting':return {'state':'timeout'}
     return state
 
+def await_task(client,base,cursor,context,observation_id,seconds=180,sleep=time.sleep):
+    """Scheduler wait has no model call and is never inferred from no_action."""
+    state=client.call({'op':'scheduler_wait',**base,'after_sequence':cursor,
+                       'task_context_token':context['task_dispatch']['context_token'],
+                       'observation_id':observation_id,'seconds':seconds})
+    if 'state' not in state:
+        if state.get('error_code')=='STALE_TASK_CONTEXT':return {'state':'context_changed','registration_error':state}
+        raise RuntimeError('scheduler wait registration rejected: '+json.dumps(state,ensure_ascii=False))
+    while state['state']=='waiting':
+        sleep(min(2,seconds))
+        state=client.call({'op':'idle_poll',**base})
+    return state
+
 def run_job(args,client,job):
     cid=job['group_task_id'];node=args.node;boot=args.boot
     folder=args.root/'runs'/cid/node
@@ -37,10 +50,11 @@ def run_job(args,client,job):
     if not r.get('registered'):raise RuntimeError(r)
     config={'models':{'edge':{'model':'gemma4-e2b:latest','base_url':args.model_url}},'edge_context':65536,'edge_output_tokens':16384,'edge_output_tokens_max':32768,'edge_length_retry':True,'edge_thinking':True,'edge_request_timeout_seconds':900,'request_timeout_seconds':180,'response_retry_attempts':1,'transport_retry_attempts':3,'transport_retry_delays':[1,3]}
     structured=job.get('protocol_mode')=='structured'
+    task_dispatch=structured and job.get('task_dispatch',False)
     if structured:config['native_no_call_control']='no_action'
     provider=Providers(config);guard=RepetitionGuard(20)
     library=RagLibrary(args.root/'vendor/knowledge',strategy_pack=args.root/'vendor/strategies')
-    instructions=(STRUCTURED_SYSTEM if structured else SYSTEM)+'\n你的节点身份：'+node
+    instructions=(TASK_SYSTEM if task_dispatch else STRUCTURED_SYSTEM if structured else SYSTEM)+'\n你的节点身份：'+node
     initial={'group_task_id':cid,'node_id':node,'goal':job['goal'],'cloud_available':False}
     activation=job.get('activation',1)
     memory=WorkingMemory(args.root/'runs'/cid/node/'working_memory.json',cid,node) if structured else None
@@ -63,7 +77,26 @@ def run_job(args,client,job):
             messages.append({'role':'user','content':json.dumps({'peer_events':rows},ensure_ascii=False)})
         # Retain original goal plus a bounded recent history; full raw calls remain on disk.
         context=client.call({'op':'runtime_state',**base,'observation_id':lastobs}) if structured else client.call({'op':'local_context',**base})
-        catalog=stable_catalog() if structured else CAT
+        while task_dispatch and context['task_dispatch']['current_task'] and context['task_dispatch']['current_task']['state']=='waiting':
+            remaining=job.get('remaining_seconds',3600)-(time.monotonic()-started)
+            if remaining<=0:status='observation_window_ended';break
+            ev.add('scheduler_wait',node,context['task_dispatch'])
+            state=await_task(client,base,cursor,context,lastobs,min(180,remaining))
+            if state['state']=='ended':status='task_ended_externally';break
+            if state['state']=='ready':
+                rows=state['messages'];cursor=state['cursor']
+                if memory:memory.record_peer(rows,activation)
+                ev.add('peer_messages_delivered_to_model',node,{'message_ids':[x['message_id'] for x in rows],'messages':rows,'source':'scheduler_wait'})
+                messages.append({'role':'user','content':json.dumps({'peer_events':rows},ensure_ascii=False)})
+            else:
+                ev.add('scheduler_dependency_end',node,state)
+                messages.append({'role':'user','content':json.dumps({'scheduler_dependency_result':state},ensure_ascii=False)})
+            context=client.call({'op':'runtime_state',**base,'observation_id':lastobs})
+        if status in ('observation_window_ended','task_ended_externally'):break
+        if task_dispatch:
+            if not context['task_dispatch']['current_task']:status='subtask_no_ready_task';break
+            ev.add('subtask_dispatched_to_model',node,context['task_dispatch'])
+        catalog=task_catalog() if task_dispatch else stable_catalog() if structured else CAT
         if structured:provider.config['tool_descriptions']={name:value[0] for name,value in catalog.items()}
         model_messages=model_history(messages)+[{'role':'user','content':json.dumps({'protocol_context':context},ensure_ascii=False)}]
         answer=provider.call('edge',model_messages,{k:v[1] for k,v in catalog.items()},ev)
@@ -88,9 +121,12 @@ def run_job(args,client,job):
         if action in ('record_finding','configure_local_rate','offer_group_plan','revise_group_plan','review_group_plan','execute_group_plan','publish_resource_snapshot','calculate_link_options','finish') or structured and action in ('request_peer_resources','wait_for_collaboration'):
             arguments['observation_id']=lastobs
         if action in ('read_peer_events','wait_peer_event','wait_for_collaboration') and 'after_sequence' not in arguments:arguments['after_sequence']=cursor
+        if task_dispatch:arguments.setdefault('observation_id',lastobs)
         ev.add('framework_identity_binding',node,{'model_arguments':value['arguments'],'effective_arguments':arguments,'business_values_rewritten':False})
         rid=request_prefix+':decision:'+str(step)
-        if argument_error:result={'ok':False,'error_code':'INVALID_ARGUMENTS','error':argument_error,'public_argument_schema':catalog[action][1]}
+        task_metadata={'task_context_token':context['task_dispatch']['context_token'],'model_arguments':value['arguments']} if task_dispatch else {}
+        if argument_error and task_dispatch:result=client.call({'op':'tool',**base,'name':action,'arguments':arguments,'request_id':rid,**task_metadata})
+        elif argument_error:result={'ok':False,'error_code':'INVALID_ARGUMENTS','error':argument_error,'public_argument_schema':catalog[action][1]}
         elif action=='retrieve_knowledge':result={'ok':True,'result':library.search(arguments['query'])}
         elif action=='get_report_template':
             template_seen=True;result={'ok':True,'result':json.loads((args.root/'vendor/templates/capability_gap_report.json').read_text(encoding='utf-8-sig'))}
@@ -100,7 +136,7 @@ def run_job(args,client,job):
         elif action=='get_request_status':result=client.call({'op':'request_status',**base,'request_id':arguments['request_id']})
         else:
             if action=='wait_peer_event':time.sleep(10)
-            result=client.call({'op':'tool',**base,'name':action,'arguments':arguments,'request_id':rid})
+            result=client.call({'op':'tool',**base,'name':action,'arguments':arguments,'request_id':rid,**task_metadata})
         guard.outcome(key,result.get('ok',False));ev.add('node_tool_result',node,{'action':action,'arguments':arguments,'request_id':rid,'response':result})
         if memory:memory.record_tool(action,value['arguments'],arguments,result,rid,activation)
         wake_rows=[]
@@ -122,12 +158,15 @@ def run_job(args,client,job):
         messages.extend([answer['assistant_message'],{'role':'tool','tool_name':action,'content':json.dumps({'tool_result':result},ensure_ascii=False)}])
         if wake_rows:messages.append({'role':'user','content':json.dumps({'peer_events':wake_rows},ensure_ascii=False)})
         write_json(folder/'progress.json',{'steps':step+1,'last_action':action,'last_observation_id':lastobs,'status':'running'})
+        if result.get('task_dispatch_outcome',{}).get('task_failed'):
+            status='subtask_repeated_error';break
         if action=='finish' and result.get('ok'):
             status=arguments['status'];ledger.transition('solved' if status=='solved' else 'unresolved',{'model_submission':arguments});break
     if status not in ('solved','unresolved','needs_resources'):
         client.call({'op':'runtime_end',**base,'reason':status})
         ledger.transition('unresolved',{'runtime_status':status,'model_submission':None})
     if memory:memory.record_outcome(status,activation)
+    if task_dispatch:write_json(folder/'task_graph.json',client.call({'op':'task_snapshot',**base}))
     write_json(folder/'result.json',{'status':status,'elapsed_seconds':time.monotonic()-started,'model_calls':provider.counter,'node_id':node})
 
 def main():

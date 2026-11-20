@@ -28,11 +28,12 @@ class Plant:
         self.db.execute("INSERT OR REPLACE INTO state VALUES('plant',?)",(json.dumps(self.state),));self.db.commit()
     def event(self,kind,actor,data):
         self.db.execute('INSERT INTO events(kind,actor,body) VALUES(?,?,?)',(kind,actor,json.dumps({'time':time.time(),**data},ensure_ascii=False)))
-    def create(self,label,change_policy='after_samples',protocol_mode='legacy',event_reactivation=False):
+    def create(self,label,change_policy='after_samples',protocol_mode='legacy',event_reactivation=False,task_dispatch=False):
         require(label in CASES,'UNKNOWN_CASE','unknown fixture')
         require(change_policy in ('after_samples','at_start'),'INVALID_POLICY','unknown change policy')
         require(protocol_mode in ('legacy','structured'),'INVALID_POLICY','unknown protocol mode')
         require(type(event_reactivation) is bool,'INVALID_POLICY','event reactivation must be boolean')
+        require(type(task_dispatch) is bool and (not task_dispatch or protocol_mode=='structured'),'INVALID_POLICY','task dispatch requires structured protocol')
         if self.state['active']:
             prior=self.case(self.state['active']);require(all(prior['finished'].values()),'ACTIVE_CASE','previous case still active')
         cid='group_'+uuid.uuid4().hex[:12]
@@ -40,7 +41,7 @@ class Plant:
                  'selected_path':'primary','video_rate_mbps':5.,'background_mbps':0.,
                  'ports':{'primary':{'physical_up':True,'enabled':True,'channel':'c1','capacity_mbps':8.},
                           'backup':{'physical_up':True,'enabled':False,'channel':'c2','capacity_mbps':6.}}} for n in ('A','B')}
-        case={'id':cid,'fixture':label,'protocol_mode':protocol_mode,'event_reactivation':event_reactivation,'active_plan_id':None,'change_policy':change_policy,'minimum_samples':2 if change_policy=='at_start' else 4,'nodes':nodes,'observations':{},'messages':[],
+        case={'id':cid,'fixture':label,'protocol_mode':protocol_mode,'event_reactivation':event_reactivation,'task_dispatch':task_dispatch,'active_plan_id':None,'change_policy':change_policy,'minimum_samples':2 if change_policy=='at_start' else 4,'nodes':nodes,'observations':{},'messages':[],
               'plans':{},'finished':{'A':None,'B':None},'changed':False,'stale_injected':False,
               'partition':False,'created':time.time(),'findings':[],'executions':[],'boots':{},'peer_delivery':[],
               'activations':{'A':1,'B':1},'node_history':{'A':[],'B':[]},'decisions':{'A':0,'B':0},'delivered':{'A':0,'B':0}}
@@ -98,7 +99,11 @@ class Plant:
         node=c['nodes'][n]
         require(allow_prior_activation or ob.get('activation',1)==c.get('activations',{}).get(n,1),'STALE_OBSERVATION','observation belongs to previous local task activation')
         require(ob['config_version']==node['config_version'] and ob['environment_revision']==node['environment_revision'],'STALE_OBSERVATION','local state changed; actively sample again')
-        require(time.time()-ob['sampled_at']<=1800,'STALE_OBSERVATION','observation expired');return ob
+        require(time.time()-ob['sampled_at']<=1800,'STALE_OBSERVATION','observation expired')
+        if c.get('task_dispatch') and not allow_prior_activation:
+            known={m['message_id'] for m in self.received(c,n) if m['kind']=='execution_receipt'}
+            require(known<=set(ob.get('known_peer_execution_ids',[])),'STALE_OBSERVATION','received peer execution changed the known business context; actively sample again')
+        return ob
     def plan(self,c,pid):
         require(pid in c['plans'],'UNKNOWN_PLAN','unknown plan_id');return c['plans'][pid]
     def valid_actions(self,c,n,v):
@@ -174,6 +179,7 @@ class Plant:
         if name=='read_sensor_adapter':
             self.inject(c);node['sample_sequence']+=1
             ob={'observation_id':'obs_'+uuid.uuid4().hex[:12],'node_id':n,'group_task_id':c['id'],'activation':c['activations'][n],'sampled_at':time.time(),**clone(node),'measurements':self.measure(c)}
+            if c.get('task_dispatch'):ob['known_peer_execution_ids']=[m['message_id'] for m in self.received(c,n) if m['kind']=='execution_receipt']
             c['observations'][ob['observation_id']]=ob;return ob
         if name=='read_peer_catalog':return {'peer_id':'B' if n=='A' else 'A','capabilities':['local_configuration','group_plan_response','prepare','apply'],'coordinator':'A'}
         if name=='read_local_commitments':return self.local_context(c,n)
@@ -280,11 +286,12 @@ class Plant:
         with self.lock:
             op=data.get('op')
             if actor=='admin':
+                if op=='capabilities':return {'task_dispatch_revision':'r11','stable_public_tools':17,'task_context_binding':True,'post_execution_barrier':True}
                 if op=='begin_suite':
                     if self.state['active']:require(all(self.case(self.state['active'])['finished'].values()),'ACTIVE_CASE','previous suite still has live nodes')
                     self.state.update(suite_done=False,active=None,suite_name=data['name']);self.save();return {'started':data['name']}
                 if op=='suite_end':self.state['suite_done']=True;self.save();return {'stopped':True}
-                if op=='create':return {'case_id':self.create(data['fixture'],data.get('change_policy','after_samples'),data.get('protocol_mode','legacy'),data.get('event_reactivation',False))}
+                if op=='create':return {'case_id':self.create(data['fixture'],data.get('change_policy','after_samples'),data.get('protocol_mode','legacy'),data.get('event_reactivation',False),data.get('task_dispatch',False))}
                 if op=='snapshot':return clone(self.case(data['case_id']))
                 if op=='force_end':
                     c=self.case(data['case_id'])
@@ -305,16 +312,31 @@ class Plant:
                 goal={**GOAL,'observation_window_per_node':c.get('minimum_samples',4)}
                 if c.get('protocol_mode')=='structured':goal={**goal,'observation_window_per_node':1,'completion_semantics':'solved means verified minimum service floor; desired quality and protocol completion are separate','voice_satisfaction_definition':'voice_delivered_mbps / voice_demand_mbps'}
                 source=c.get('activation_sources',{}).get(actor)
-                return {'job':{'group_task_id':cid,'node_id':actor,'goal':goal,'cloud_available':False,'protocol_mode':c.get('protocol_mode','legacy'),'activation':c.get('activations',{}).get(actor,1),'activation_source':{'source_message_id':source['source_message_id']} if source else None,'remaining_decisions':64-c.get('decisions',{}).get(actor,0),'remaining_seconds':max(0,3600-(time.time()-c['created']))}}
+                return {'job':{'group_task_id':cid,'node_id':actor,'goal':goal,'cloud_available':False,'protocol_mode':c.get('protocol_mode','legacy'),'task_dispatch':c.get('task_dispatch',False),'activation':c.get('activations',{}).get(actor,1),'activation_source':{'source_message_id':source['source_message_id']} if source else None,'remaining_decisions':64-c.get('decisions',{}).get(actor,0),'remaining_seconds':max(0,3600-(time.time()-c['created']))}}
             c=self.case(data['case_id'])
             if op=='register':
                 boot=data['boot_id'];prior=c['boots'].get(actor)
                 require(not prior or prior==boot,'EXPLICIT_RECOVERY_REQUIRED','previous node boot already registered; explicit recovery needed');c['boots'][actor]=boot;self.save();return {'registered':actor}
             require(c['boots'].get(actor)==data.get('boot_id'),'STALE_BOOT','node boot identity mismatch')
             if op=='local_context':return self.local_context(c,actor)
+            if op=='task_snapshot':
+                require(c.get('task_dispatch'),'INVALID_POLICY','task scheduler not enabled')
+                return clone(c.get('task_graphs',{}).get(actor,{}))
             if op=='runtime_state':
                 from .protocol import StructuredProtocol
                 return StructuredProtocol(self,c,actor).state(data.get('observation_id'))
+            if op=='scheduler_wait':
+                from .protocol import StructuredProtocol
+                from .tasks import TaskGraph
+                require(c.get('task_dispatch'),'INVALID_POLICY','task scheduler not enabled')
+                state=StructuredProtocol(self,c,actor).state(data.get('observation_id'))['task_dispatch']
+                graph=TaskGraph(self,c,actor);graph.check(data.get('task_context_token'))
+                task=state['current_task'];require(task['state']=='waiting','WAIT_DEPENDENCY_REQUIRED','scheduler only waits on a real pending dependency')
+                require(data['after_sequence']>=c['delivered'][actor],'STALE_CURSOR','do not replay previously delivered messages')
+                seconds=data.get('seconds',180);require(type(seconds) in (int,float) and 0<seconds<=180,'INVALID_ARGUMENTS','wait interval must be within 180 seconds')
+                c.setdefault('waiting',{'A':None,'B':None})[actor]={'after_sequence':data['after_sequence'],'awaited':task['wait_target'],'scheduler_task_id':task['task_id'],'deadline':min(time.time()+seconds,c['created']+3600)}
+                self.event('scheduler_wait_registered',actor,{'case_id':c['id'],**c['waiting'][actor]});self.save()
+                return {'state':'waiting','task_id':task['task_id']}
             if op in ('idle','idle_poll'):
                 waiting=c.setdefault('waiting',{'A':None,'B':None})
                 if c['finished'][actor]:return {'state':'ended'}
@@ -329,17 +351,28 @@ class Plant:
                     intent=clone(waiting[actor]);inbox=self.tool(c,actor,'read_peer_events',{'after_sequence':cursor});waiting[actor]=None
                     self.event('node_woken',actor,{'case_id':c['id'],'message_ids':[m['message_id'] for m in inbox['messages']]})
                     expected={'peer_resources':('resource_snapshot',),'plan_update':('plan_proposed','plan_response'),'authorization':('plan_authorized',),'execution_receipt':('execution_receipt',)}.get(intent.get('awaited'),())
+                    if intent.get('scheduler_task_id'):
+                        from .tasks import TaskGraph
+                        TaskGraph(self,c,actor).wait_result(intent['scheduler_task_id'],'ready',[m['message_id'] for m in inbox['messages']])
                     self.save();return {'state':'ready',**inbox,'awaited':intent.get('awaited'),'awaited_event_observed':any(m['kind'] in expected for m in inbox['messages'])}
                 peer='B' if actor=='A' else 'A'
                 peer_wait=waiting[peer]
                 peer_pending=peer_wait and any(m['recipient']==peer and m['sequence']>peer_wait['after_sequence'] for m in c['messages'])
                 quiet=(c['finished'][peer] is not None or peer_wait is not None) and not peer_pending
                 terminal='deadlock' if c.get('protocol_mode')=='structured' else 'quiescent'
+                if waiting[actor].get('scheduler_task_id') and (quiet or time.time()>=waiting[actor]['deadline']):
+                    from .tasks import TaskGraph
+                    state='deadlock' if quiet else 'timeout';intent=waiting[actor];waiting[actor]=None
+                    TaskGraph(self,c,actor).wait_result(intent['scheduler_task_id'],state)
+                    self.save();return {'state':state,'task_id':intent['scheduler_task_id'],'channel_available':not c['partition']}
                 self.save();return {'state':terminal if quiet else 'waiting','channel_available':not c['partition']}
             if op=='trace':
                 c['decisions'][actor]+=1
                 self.event('model_turn',actor,{k:v for k,v in data.items() if k not in ('op','boot_id')});self.save();return {'recorded':True}
             if op=='runtime_end':
+                if c.get('task_dispatch'):
+                    from .tasks import TaskGraph
+                    TaskGraph(self,c,actor).end(data['reason'])
                 c['finished'][actor]={'runtime_status':data['reason']}
                 if c.get('event_reactivation'):
                     c['finished'][actor]['ended_at']=time.time()
@@ -349,7 +382,9 @@ class Plant:
             if op=='request_status':
                 row=self.db.execute('SELECT result FROM requests WHERE id=?',(actor+':'+data['request_id'],)).fetchone();return {'status':'complete' if row else 'unknown','result':json.loads(row[0]) if row else None}
             require(op=='tool','UNKNOWN_OPERATION',str(op));require(not c['finished'][actor],'TASK_ENDED','local task already ended')
-            rid=actor+':'+data['request_id'];fp=sha({k:data[k] for k in ('case_id','boot_id','name','arguments')})
+            rid=actor+':'+data['request_id'];identity={k:data[k] for k in ('case_id','boot_id','name','arguments')}
+            if c.get('task_dispatch'):identity.update(task_context_token=data.get('task_context_token'),model_arguments=data.get('model_arguments'))
+            fp=sha(identity)
             row=self.db.execute('SELECT fp,result FROM requests WHERE id=?',(rid,)).fetchone()
             if row:
                 require(row[0]==fp,'REQUEST_ID_CONFLICT','same request_id with different operation');return json.loads(row[1])
@@ -357,11 +392,18 @@ class Plant:
             try:
                 if c.get('protocol_mode')=='structured':
                     from .protocol import StructuredProtocol
-                    result=StructuredProtocol(self,c,actor).dispatch(data['name'],data['arguments'])
+                    result=StructuredProtocol(self,c,actor).dispatch(data['name'],data['arguments'],data.get('task_context_token'),data.get('model_arguments'))
                 elif data['name'] in ('offer_group_plan','revise_group_plan','review_group_plan','execute_group_plan'):result=self.semantic_tool(c,actor,data['name'],data['arguments'])
                 else:result={'ok':True,'result':self.tool(c,actor,data['name'],data['arguments'])}
             except Fault as e:result={'ok':False,'error_code':e.code,'error':str(e)}
             except (KeyError,TypeError,ValueError) as e:result={'ok':False,'error_code':'INVALID_ARGUMENTS','error':str(e)}
+            if c.get('task_dispatch') and data['name']!='read_peer_events':
+                from .tasks import TaskGraph
+                graph=TaskGraph(self,c,actor)
+                if data.get('task_context_token')==graph.d['context_digest']:
+                    graph.record_tool(data['name'],data['arguments'] if result.get('ok') else data.get('model_arguments',data['arguments']),result,data['request_id'])
+                    current=graph.d['tasks'].get(graph.d['current_task_id'])
+                    result['task_dispatch_outcome']={'task_id':graph.d['current_task_id'],'task_failed':bool(current and current['state']=='failed'),'summary':graph.summary()}
             if data['name'] in ('execute_group_plan','apply_local_plan') and data['arguments'].get('plan_id') in c['plans']:
                 attempts=c.setdefault('execution_attempts',{'A':{},'B':{}})[actor]
                 attempts[data['arguments']['plan_id']]={'request_id':data['request_id'],'ok':result['ok'],'error_code':result.get('error_code')}
@@ -382,7 +424,9 @@ class Plant:
                 'changed':c['changed'],'prepare_change_observed':c['stale_injected'],'peer_partition_observed':c['partition'],
                 'service_floor_met':solved,'desired_quality_met':solved and m['video_delivered_mbps']>=GOAL['video_desired_mbps'],
                 'protocol_status':self.protocol_status(c),'sample_sequences':{n:v['sample_sequence'] for n,v in c['nodes'].items()},
-                'sampling_window_compliant':{n:v['sample_sequence']>=2 for n,v in c['nodes'].items()}}
+                'sampling_window_compliant':{n:v['sample_sequence']>=2 for n,v in c['nodes'].items()},
+                'task_dispatch_enabled':c.get('task_dispatch',False),
+                'subtask_summaries':{n:__import__('dual_lab.tasks',fromlist=['TaskGraph']).TaskGraph(self,c,n).summary() for n in ('A','B')} if c.get('task_dispatch') else {}}
     def protocol_status(self,c):
         p=c['plans'].get(c.get('active_plan_id'))
         if p is None:return 'not_started'

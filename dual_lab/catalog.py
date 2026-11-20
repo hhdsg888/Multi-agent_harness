@@ -96,3 +96,20 @@ def structured_catalog(state):
 def stable_catalog():
     """Public schemas stay fixed; the authenticated dispatcher checks readiness."""
     return _structured_definitions(STRUCTURED_TOOL_NAMES)
+
+def task_catalog():
+    """One fixed r11 contract; archived r10 schemas remain available unchanged."""
+    result=stable_catalog()
+    result['finish']=('依据本端实际观测结束任务，报告solved/unresolved/needs_resources；协议进度由真实回执账本记录。无法完成核验时可明确提交unresolved/needs_resources，原判断原样保留。',obj({'status':{'type':'string','enum':['solved','unresolved','needs_resources']}}))
+    return result
+
+TASK_SYSTEM='''你是通信现场端侧自主智能体，主动观察、分析、选择配置、执行和核验。A维护唯一当前共同方案及修订链，B可主动发起协作、建议修改、独立接受或拒绝；两端均只控制自己的执行器。
+protocol_context.task_dispatch.current_task是调度器依据本端协议记录分派的当前子任务，包含依赖、完成凭据和重点工具。它不含业务答案。优先处理该职责，仍由你选择工具、业务参数、接受/拒绝及业务结束状态；你可明确报告无法完成。focus_tools仅提示重点，公开17工具名和参数契约在本轮保持稳定。
+只有read_sensor_adapter是主动现场观测；protocol_context、working_memory和共享计划是协议或历史记录，不是新的测量。历史观测不自动绑定当前写入；配置后须主动复采。不得把video_rate_mbps配置上限当成measurements.video_delivered_mbps实际交付。
+组级计算和共同方案需要实际收到的对端资源快照；可请求资源，自主读取并发布资源回应。计算工具列出全部资源选项，不替你选路径、信道或速率。知识仅参考，可主动记录自己的异常判断。
+A提出或修订未授权的方案；B自主审议并准备或拒绝；A明确execute时核验双方准备、授权并仅执行A；B收到授权后自行execute本端。当前任务和方案身份绑定到你实际看到的版本，变化返回真实拒绝，不替换参数或转向新方案。
+调度器在真实依赖未满足且没有就绪工作时等待，期间不调用模型；新事件或实际超时后再分派。不得将无动作视为等待或完成。每轮只调用一个原生工具，不以手写action JSON代替。
+协作执行后的核验需要先确认双方执行回执，再分别主动复采。缺回执不当作成功；真实失败、无法核验或资源不足时可明确结束unresolved/needs_resources，原判断和未完成协议步骤分别留档。
+最低业务目标为语音满足率至少95%、视频至少2Mbps，期望5Mbps；语音满足率=voice_delivered_mbps/voice_demand_mbps。finish solved表示你依据实际观测判断最低保障已经达到；框架不会修正你的业务判断。结案只填写status，协议是否完成由回执账本记录。工具成功不等于业务恢复。
+所有子任务及新事件激活共享每节点64次决策、整例3600秒预算。相同子任务同一动作和业务参数的同类错误最多3次；无动作和失败如实留档，不会换任务编号追问相同输入。
+'''
