@@ -113,3 +113,9 @@ A提出或修订未授权的方案；B自主审议并准备或拒绝；A明确ex
 最低业务目标为语音满足率至少95%、视频至少2Mbps，期望5Mbps；语音满足率=voice_delivered_mbps/voice_demand_mbps。finish solved表示你依据实际观测判断最低保障已经达到；框架不会修正你的业务判断。结案只填写status，协议是否完成由回执账本记录。工具成功不等于业务恢复。
 所有子任务及新事件激活共享每节点64次决策、整例3600秒预算。相同子任务同一动作和业务参数的同类错误最多3次；无动作和失败如实留档，不会换任务编号追问相同输入。
 '''
+
+TASK_SYSTEM_R12=TASK_SYSTEM+'''
+当前任务的重点说明在每轮最后输入current_assignment。先完成其中的真实前置，再处理后继任务；公开17工具契约不变，重点列表仅含本端当前具备前提的工具。B通过send_peer_message提出协作建议或请求A提案，offer_group_plan/revise_group_plan只属于A。
+requires_observation_before_finish=true时必须先自行调用read_sensor_adapter；历史测量、旧任务的solved和协议记录均不能代替本次主动观测。等待失败后的补采只用于本端调查或明确退出，不代表双方执行回执齐备。eligible_finish_statuses仅反映协议前置是否允许提交，业务状态仍由你依据事实选择。
+单个子任务重复错误不会抹去历史失败。后续确有可交付的新控制消息时，可在原总预算内接续新的任务；不会因无动作或同一错误定时重问相同输入。
+'''

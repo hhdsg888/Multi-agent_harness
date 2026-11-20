@@ -6,7 +6,7 @@ from .adapter import NodeProviders as Providers
 from collab_lab.runtime import TaskLedger,RepetitionGuard
 from collab_lab.rag import RagLibrary
 from .client import Client
-from .catalog import CAT,SYSTEM,STRUCTURED_SYSTEM,stable_catalog,task_catalog,TASK_SYSTEM
+from .catalog import CAT,SYSTEM,STRUCTURED_SYSTEM,stable_catalog,task_catalog,TASK_SYSTEM,TASK_SYSTEM_R12
 from .memory import WorkingMemory
 from .validation import validate,model_history
 
@@ -51,10 +51,11 @@ def run_job(args,client,job):
     config={'models':{'edge':{'model':'gemma4-e2b:latest','base_url':args.model_url}},'edge_context':65536,'edge_output_tokens':16384,'edge_output_tokens_max':32768,'edge_length_retry':True,'edge_thinking':True,'edge_request_timeout_seconds':900,'request_timeout_seconds':180,'response_retry_attempts':1,'transport_retry_attempts':3,'transport_retry_delays':[1,3]}
     structured=job.get('protocol_mode')=='structured'
     task_dispatch=structured and job.get('task_dispatch',False)
+    improved=task_dispatch and job.get('task_revision')=='r12'
     if structured:config['native_no_call_control']='no_action'
     provider=Providers(config);guard=RepetitionGuard(20)
     library=RagLibrary(args.root/'vendor/knowledge',strategy_pack=args.root/'vendor/strategies')
-    instructions=(TASK_SYSTEM if task_dispatch else STRUCTURED_SYSTEM if structured else SYSTEM)+'\n你的节点身份：'+node
+    instructions=(TASK_SYSTEM_R12 if improved else TASK_SYSTEM if task_dispatch else STRUCTURED_SYSTEM if structured else SYSTEM)+'\n你的节点身份：'+node
     initial={'group_task_id':cid,'node_id':node,'goal':job['goal'],'cloud_available':False}
     activation=job.get('activation',1)
     memory=WorkingMemory(args.root/'runs'/cid/node/'working_memory.json',cid,node) if structured else None
@@ -63,6 +64,15 @@ def run_job(args,client,job):
         ev.add('working_memory_restored',node,{'path':str(memory.path),'sha256':initial['working_memory']['persistence_sha256'],'historical_only':True,'current_observation_bound':False})
     messages=[{'role':'system','content':instructions},{'role':'user','content':json.dumps(initial,ensure_ascii=False)}]
     cursor=0;lastobs=None;started=time.monotonic();status='budget_ended';template_seen=False;guard_context={}
+    if improved and activation>1:
+        packet=job.get('activation_inbox') or {};rows=packet.get('messages',[])
+        source=next((m for m in rows if m['message_id']==(job.get('activation_source') or {}).get('source_message_id')),None)
+        if packet.get('activation')!=activation or not source:raise RuntimeError('SOURCE_DELIVERY_REQUIRED: no source packet for new activation; no inference made')
+        if memory:memory.record_peer(rows,activation)
+        initial['new_event_task']={'source_message_id':source['message_id'],'message_kind':source['kind'],'sender':source['sender'],'responsibility':'处理实际交付的新协议消息，核对本端职责，自主决定调查、审议、执行或明确退出。','prior_runtime_end_is_not_completion':True}
+        messages[1]['content']=json.dumps(initial,ensure_ascii=False)
+        messages.append({'role':'user','content':json.dumps({'peer_events':rows},ensure_ascii=False)})
+        cursor=packet['cursor'];ev.add('peer_messages_delivered_to_model',node,{'message_ids':[m['message_id'] for m in rows],'messages':rows,'source':'assignment_delivery'})
     for step in range(job.get('remaining_decisions',64)):
         if time.monotonic()-started>job.get('remaining_seconds',3600):status='observation_window_ended';break
         inbox=client.call({'op':'tool',**base,'name':'read_peer_events','arguments':{'after_sequence':cursor},'request_id':request_prefix+':inbox:'+str(step)})
@@ -98,7 +108,11 @@ def run_job(args,client,job):
             ev.add('subtask_dispatched_to_model',node,context['task_dispatch'])
         catalog=task_catalog() if task_dispatch else stable_catalog() if structured else CAT
         if structured:provider.config['tool_descriptions']={name:value[0] for name,value in catalog.items()}
-        model_messages=model_history(messages)+[{'role':'user','content':json.dumps({'protocol_context':context},ensure_ascii=False)}]
+        current_input={'protocol_context':context}
+        if improved:
+            card=context['task_dispatch']['current_task']
+            current_input['current_assignment']={k:card[k] for k in ('task_id','task_type','role','instruction','focus_tools','completion_condition','requires_observation_before_finish','eligible_finish_statuses')}
+        model_messages=model_history(messages)+[{'role':'user','content':json.dumps(current_input,ensure_ascii=False)}]
         answer=provider.call('edge',model_messages,{k:v[1] for k,v in catalog.items()},ev)
         value=answer['parsed'];action=value['action'] if value else 'no_action' if structured else 'idle'
         client.call({'op':'trace',**base,'call_id':answer['call_id'],'action':action,'hostname':__import__('socket').gethostname(),'input_sha256':__import__('hashlib').sha256(json.dumps(model_messages,sort_keys=True,ensure_ascii=False).encode()).hexdigest(),'peer_message_ids':[x['message_id'] for row in model_messages if row['role']=='user' for x in json.loads(row['content']).get('peer_events',[])]})

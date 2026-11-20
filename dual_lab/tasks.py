@@ -11,6 +11,7 @@ TERMINAL={'completed','failed','superseded','closed_by_model_exit'}
 REPEAT_LIMIT=3
 TASKS={
  'OBSERVE_LOCAL':('取得本端当前有效观测，再处理后续职责。',['read_sensor_adapter']),
+ 'OBSERVE_FOR_EXIT':('依赖等待已失败，先主动补采本端事实，再自主报告无法完成或继续调查；这次采样不表示双方执行已完成。',['read_sensor_adapter']),
  'RESPOND_RESOURCE_REQUEST':('回应实际收到的资源请求；自主发布本端观测或明确报告无法回应。',['publish_resource_snapshot','send_peer_message','finish']),
  'PUBLISH_LOCAL_RESOURCES':('发布本端已观测资源，供已发起的协作交换使用。',['publish_resource_snapshot','finish']),
  'ANALYZE_OR_PROPOSE':('依据观测自主调查、选择本地处置或协作方案，也可明确结束。',['record_finding','calculate_link_options','configure_local_rate','request_peer_resources','offer_group_plan','revise_group_plan','send_peer_message','finish']),
@@ -31,6 +32,7 @@ TASKS={
 class TaskGraph:
     def __init__(self,plant,case,node):
         self.p,self.c,self.n=plant,case,node
+        self.improved=plant.improved_tasks(case)
         self.d=case.setdefault('task_graphs',{}).setdefault(node,{
             'parent_goal_id':case['id'],'node_id':node,'activation':0,'tasks':{},
             'current_task_id':None,'context_revision':0,'context_digest':None,
@@ -97,11 +99,15 @@ class TaskGraph:
                 gate=add('WAIT_BOTH_EXECUTIONS',pid+':confirmed',complete=('both_execution_receipts',[sha(self.d['barriers'][pid])]))
                 post=ob is not None and ob['sampled_at']>=self.d['barriers'][pid]['opened_at']
                 verify=add('VERIFY_LOCAL_AFTER_BARRIER',pid,deps=[gate['task_id']],complete=('post_barrier_observation',[observation_id]) if post else None)
-                if post:add('CLOSE_LOCAL_TASK',pid+':'+observation_id,deps=[verify['task_id']])
+                if post:
+                    if self.improved and state['pending_resource_request_ids']:add('RESPOND_RESOURCE_REQUEST',sha(state['pending_resource_request_ids']),deps=[verify['task_id']])
+                    else:add('CLOSE_LOCAL_TASK',pid+':'+observation_id,deps=[verify['task_id']])
         elif self.d['last_local_write']:
             write=self.d['last_local_write'];post=ob is not None and ob['sampled_at']>=write['at']
             verify=add('VERIFY_LOCAL_AFTER_WRITE',write['request_id'],complete=('post_write_observation',[observation_id]) if post else None)
-            if post:add('CLOSE_LOCAL_TASK',write['request_id']+':'+observation_id,deps=[verify['task_id']])
+            if post:
+                if self.improved and state['pending_resource_request_ids']:add('RESPOND_RESOURCE_REQUEST',sha(state['pending_resource_request_ids']),deps=[verify['task_id']])
+                else:add('CLOSE_LOCAL_TASK',write['request_id']+':'+observation_id,deps=[verify['task_id']])
         else:
             if ob is None:
                 observe=add('OBSERVE_LOCAL',str(observation_id));obs_dep=observe['task_id']
@@ -127,13 +133,17 @@ class TaskGraph:
                 else:add('WAIT_CURRENT_PLAN' if self.n=='A' else 'WAIT_AUTHORIZATION',pid+':'+sha(source_ids),deps=[obs_dep],waiting='plan_update' if self.n=='A' else 'authorization')
             else:add('ANALYZE_OR_PROPOSE',sha([observation_id,pid,source_ids]),deps=[obs_dep])
         current=selected[0] if selected else None
+        def resolve_wait(blocked):
+            key=blocked['task_id']+':'+sha(self.d['wait_failures'][blocked['task_id']])
+            if self.improved and ob is None:return add('OBSERVE_FOR_EXIT',key+':'+str(observation_id))
+            return add('RESOLVE_BLOCKED_TASK',key,deps=[self.d['last_observation_task_id']] if self.improved else [])
         if current is None:
             failed_wait=next((r for ident,r in self.d['tasks'].items() if ident in keep and ident in self.d['wait_failures']),None)
             if failed_wait:
-                current=add('RESOLVE_BLOCKED_TASK',failed_wait['task_id']+':'+sha(self.d['wait_failures'][failed_wait['task_id']]))
+                current=resolve_wait(failed_wait)
         if current and current['state']=='waiting' and current['task_id'] in self.d['wait_failures']:
             blocked=current
-            current=add('RESOLVE_BLOCKED_TASK',blocked['task_id']+':'+sha(self.d['wait_failures'][blocked['task_id']]))
+            current=resolve_wait(blocked)
         for ident,row in self.d['tasks'].items():
             if ident not in keep and row['state'] not in TERMINAL:
                 if plan and row['plan_id'] and row['plan_id']!=plan['plan_id']:
@@ -143,17 +153,30 @@ class TaskGraph:
         digest=sha({'state':state,'observation_id':observation_id,'activation':activation,'task':current,'wait_failures':self.d['wait_failures']})
         if digest!=self.d['context_digest']:
             self.d['context_revision']+=1;self.d['context_digest']=digest
-        card=self.card(current) if current else None
+        card=self.card(current,state) if current else None
         self.p.save()
         return {'current_task':card,'context_revision':self.d['context_revision'],'context_token':digest,
                 'execution_barrier':visible_barrier,'shared_budget':{'remaining_decisions':max(0,64-self.c['decisions'][self.n]),'deadline':self.c['created']+3600},
                 'summary':self.summary()}
-    def card(self,row):
+    def card(self,row,state=None):
         card=copy.deepcopy(row);description,tools=TASKS[row['task_type']]
         card.update(instruction=description,focus_tools=tools,context_revision=self.d['context_revision'])
         if row['task_type']=='EXECUTE_LOCAL_FRAGMENT' and row.get('last_error',{}).get('error_code') in ('STALE_OBSERVATION','PREPARE_EXPIRED','NOT_PREPARED'):
             card['instruction']+=' 最近执行被真实前置拒绝；先核对观测和准备版本，自主补采、沟通重审或修订未授权方案。'
             card['focus_tools']=['read_sensor_adapter','read_group_plan','review_group_plan','send_peer_message','revise_group_plan','finish']
+        if self.improved:
+            require(state is not None,'TASK_CONTEXT_REQUIRED','role and prerequisites must accompany task focus')
+            allowed=set(state['available_tools'])
+            if self.n=='B':allowed-={'offer_group_plan','revise_group_plan'}
+            card['focus_tools']=[name for name in card['focus_tools'] if name in allowed]
+            if not card['focus_tools'] and row['state']=='ready':card['focus_tools']=['read_sensor_adapter']
+            if self.n=='B' and row['task_type']=='ANALYZE_OR_PROPOSE':
+                card['instruction']='独立分析本端观测，通过send_peer_message向A提出协作建议或请求其提案，或明确结案。共同方案由A创建/修订；你保留独立接受、拒绝和本端执行权。'
+            sample_task=row['task_type'] in ('OBSERVE_LOCAL','OBSERVE_FOR_EXIT','VERIFY_LOCAL_AFTER_BARRIER','VERIFY_LOCAL_AFTER_WRITE')
+            card['completion_condition']='本端read_sensor_adapter实际成功回执；历史观测和口头完成不能替代。' if sample_task else '当前职责的真实工具回执或模型明确退出；业务状态仍由模型判断。'
+            card['requires_observation_before_finish']=not state['local_observation_valid']
+            card['eligible_finish_statuses']=[] if not state['local_observation_valid'] else ['unresolved','needs_resources'] if self.visible_barrier and not self.visible_barrier['confirmed'] else ['solved','unresolved','needs_resources']
+            card['role']='coordinator' if self.n=='A' else 'resource_owner'
         return card
     def check(self,token):
         require(token and token==self.d['context_digest'],'STALE_TASK_CONTEXT','task or visible protocol context changed after input; no automatic retargeting')
@@ -166,7 +189,7 @@ class TaskGraph:
         reviewed=result.get('result',{}).get('review') if isinstance(result.get('result'),dict) else None
         if result.get('ok') or action=='review_group_plan' and reviewed is not None:
             if action=='read_sensor_adapter':
-                kinds={'OBSERVE_LOCAL','VERIFY_LOCAL_AFTER_WRITE','VERIFY_LOCAL_AFTER_BARRIER'}
+                kinds={'OBSERVE_LOCAL','OBSERVE_FOR_EXIT','VERIFY_LOCAL_AFTER_WRITE','VERIFY_LOCAL_AFTER_BARRIER'}
                 if current['task_type'] in kinds:
                     self.complete(current,'sensor_receipt',[request_id,result['result']['observation_id']]);self.d['last_observation_task_id']=current['task_id']
             elif action=='publish_resource_snapshot' and current['task_type'] in ('RESPOND_RESOURCE_REQUEST','PUBLISH_LOCAL_RESOURCES'):
