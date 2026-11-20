@@ -2,11 +2,17 @@ import argparse,json,sys,time,uuid,traceback
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT/'vendor'))
 from collab_lab.common import Evidence,write_json
-from collab_lab.providers import Providers
+from .adapter import NodeProviders as Providers
 from collab_lab.runtime import TaskLedger,RepetitionGuard
 from collab_lab.rag import RagLibrary
 from .client import Client
 from .catalog import CAT,SYSTEM
+
+def failure_identity(folder):
+    for line in (folder/'events.jsonl').read_text(encoding='utf-8').splitlines():
+        row=json.loads(line)
+        if row.get('kind')=='node_identity':return row['data']
+    raise RuntimeError('node identity event missing; preserve failure for explicit recovery')
 
 def run_job(args,client,job):
     cid=job['group_task_id'];node=args.node;boot=uuid.uuid4().hex
@@ -77,7 +83,7 @@ def main():
             folder=a.root/'runs'/job['group_task_id']/a.node
             write_json(folder/'failure.json',{'type':type(e).__name__,'error':str(e),'traceback':traceback.format_exc()})
             # The registered boot ID is kept in the first local identity event.
-            identity=json.loads((folder/'events.jsonl').read_text(encoding='utf-8').splitlines()[0])['data']
+            identity=failure_identity(folder)
             category='model_response_failure' if getattr(e,'code','') in ('MODEL_RESPONSE_INVALID','MODEL_RESPONSE_INCOMPLETE') else type(e).__name__
             client.call({'op':'runtime_end','case_id':job['group_task_id'],'boot_id':identity['boot_id'],'reason':category+': '+str(e)})
 if __name__=='__main__':main()

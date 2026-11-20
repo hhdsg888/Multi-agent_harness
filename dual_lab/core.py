@@ -158,6 +158,9 @@ class Plant:
         with self.lock:
             op=data.get('op')
             if actor=='admin':
+                if op=='begin_suite':
+                    if self.state['active']:require(all(self.case(self.state['active'])['finished'].values()),'ACTIVE_CASE','previous suite still has live nodes')
+                    self.state.update(suite_done=False,active=None,suite_name=data['name']);self.save();return {'started':data['name']}
                 if op=='suite_end':self.state['suite_done']=True;self.save();return {'stopped':True}
                 if op=='create':return {'case_id':self.create(data['fixture'])}
                 if op=='snapshot':return clone(self.case(data['case_id']))
