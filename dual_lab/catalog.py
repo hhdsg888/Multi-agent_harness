@@ -49,7 +49,7 @@ for _name,(_description,_schema) in list(CAT.items()):
         CAT[_name]=(_description+' 观测身份由框架绑定最近一次主动采样；未采样或过期会拒绝。',_schema)
 
 STRUCTURED_SYSTEM='''你是通信现场端侧自主智能体。A维护当前共同方案及其唯一修订链，B负责本端资源意见；B可主动请求协作、提出修改建议、接受或拒绝方案。两端均只执行自己的片段。
-工具按当前协议状态开放。你自主决定如何调查、选择配置、接受或拒绝、执行与核验；框架只管理前置条件、身份、消息及当前方案版本，不选择业务参数。
+公开工具名和参数契约保持稳定。protocol_context.available_tools说明当前具备前提的工具，allowed_wait_targets说明当前合法等待目标；不满足前提或参数非法时返回真实错误回执，不执行、不修正参数。你自主决定如何调查、选择配置、接受或拒绝、执行与核验；框架只管理前置条件、身份、消息及当前方案版本，不选择业务参数。
 主动传感器观测才是现场事实。protocol_context是协议记录，current_plan是共享控制记录，不是新的传感器读数。local_applied仅代表本端执行，其他节点的回执不能替代它。
 组级资源计算及A提出方案需要实际收到的对端资源快照；可request_peer_resources请求，节点自行读取后publish_resource_snapshot回应。calculate_link_options列出全部已知可行区间，不替你选择或执行。B可用send_peer_message发起协作或提出修改意见。
 一个时刻只有一个共同方案：A提出或修订，双方各自审议并准备；A明确执行时核验双方准备并授权，只执行A；B收到授权后自行执行B。准备失败不等于协议接受。当前方案身份由框架固定到你本轮看到的版本，变化会拒绝，不能猜ID或替换业务参数。
@@ -60,22 +60,39 @@ finish solved表示已主动观测核验最低保障达到；quality_status可�
 本端local_work记录调查与协议责任，不给出故障结论或配置答案。资源请求前须有本端有效观测。resource_response_owed=true表示你欠对端回执：对端已向你请求资源，而你尚未发布回应；此时新请求和等待不可用，你可自行观测、发布或结束。outgoing_resource_request_ids表示你发出的请求尚未收到对端回复，和你欠对端回执是两回事；你发布了本端资源且没有欠回执后，可按allowed_wait_targets等待真实外部回复。
 等待只针对allowed_wait_targets中的实际对端责任：等资源须已有未获回应的请求并发布当前本端资源；B发布资源后可等A的当前方案，A须自行决定共同方案，不能等待B创建；接受后的B可等A授权，已执行本端后可等对端执行回执。目录未开放等待时，你仍可调查、沟通、报告缺口或结束，框架不替你完成任何业务动作。
 video_rate_mbps是本地配置上限，measurements.video_delivered_mbps才是实际交付。NO_CHANGE表示没有写入，不能据此认定业务恢复。finish状态仍由你依据实际观测决定，原始判断会独立核对。
+working_memory仅保存本端过去实际收到的消息和工具回执，模型原参数仍是原判断。历史观测/计算没有重新核验鲜度，不能当成本任务新观测；写入身份仍只绑定本任务最近主动采样。
 '''
 
-def structured_catalog(state):
+STRUCTURED_TOOL_NAMES=(
+    'read_sensor_adapter','record_finding','request_peer_resources','publish_resource_snapshot',
+    'calculate_link_options','send_peer_message','configure_local_rate','offer_group_plan',
+    'revise_group_plan','review_group_plan','read_group_plan','execute_group_plan',
+    'wait_for_collaboration','retrieve_knowledge','get_report_template','report_gap','finish',
+)
+
+def _structured_definitions(names):
     import copy
-    result={name:(description,copy.deepcopy(schema)) for name in state['available_tools'] for description,schema in [CAT[name]]}
+    result={name:(description,copy.deepcopy(schema)) for name in names for description,schema in [CAT[name]]}
     for name in ('review_group_plan','revise_group_plan','execute_group_plan','read_group_plan'):
         if name not in result:continue
         description,schema=result[name]
         schema['properties'].pop('plan_id',None)
         if 'plan_id' in schema['required']:schema['required'].remove('plan_id')
         result[name]=('作用于本轮protocol_context中的当前方案；方案ID/hash由框架绑定，变化会拒绝。'+description,schema)
-    if 'calculate_link_options' in result and not state['peer_resource_snapshot_available']:
-        result['calculate_link_options'][1]['properties']['scope']['enum']=['local']
-    if 'wait_for_collaboration' in result:
-        result['wait_for_collaboration'][1]['properties']['awaited']['enum']=list(state['allowed_wait_targets'])
     if 'finish' in result:
         description,schema=result['finish'];schema['properties'].update(quality_status={'type':'string','enum':['desired_reached','degraded_acceptable','not_assessed']},protocol_disposition={'type':'string','enum':['completed','deferred','abandoned','not_required']})
         result['finish']=('结束本地任务；solved对应主动观测已核验最低保障；期望质量quality_status和协议protocol_disposition分别报告。至少一次当前有效观测即可提交，采样次数另计分；执行后须主动复采。',schema)
     return result
+
+def structured_catalog(state):
+    """Retain the r9 catalog for archived contract regression checks."""
+    result=_structured_definitions(state['available_tools'])
+    if 'calculate_link_options' in result and not state['peer_resource_snapshot_available']:
+        result['calculate_link_options'][1]['properties']['scope']['enum']=['local']
+    if 'wait_for_collaboration' in result:
+        result['wait_for_collaboration'][1]['properties']['awaited']['enum']=list(state['allowed_wait_targets'])
+    return result
+
+def stable_catalog():
+    """Public schemas stay fixed; the authenticated dispatcher checks readiness."""
+    return _structured_definitions(STRUCTURED_TOOL_NAMES)

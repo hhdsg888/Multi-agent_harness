@@ -6,7 +6,8 @@ from .adapter import NodeProviders as Providers
 from collab_lab.runtime import TaskLedger,RepetitionGuard
 from collab_lab.rag import RagLibrary
 from .client import Client
-from .catalog import CAT,SYSTEM,STRUCTURED_SYSTEM,structured_catalog
+from .catalog import CAT,SYSTEM,STRUCTURED_SYSTEM,stable_catalog
+from .memory import WorkingMemory
 from .validation import validate,model_history
 
 def failure_identity(folder):
@@ -41,6 +42,11 @@ def run_job(args,client,job):
     library=RagLibrary(args.root/'vendor/knowledge',strategy_pack=args.root/'vendor/strategies')
     instructions=(STRUCTURED_SYSTEM if structured else SYSTEM)+'\n你的节点身份：'+node
     initial={'group_task_id':cid,'node_id':node,'goal':job['goal'],'cloud_available':False}
+    activation=job.get('activation',1)
+    memory=WorkingMemory(args.root/'runs'/cid/node/'working_memory.json',cid,node) if structured else None
+    if memory and memory.path.exists():
+        initial['working_memory']=memory.context()
+        ev.add('working_memory_restored',node,{'path':str(memory.path),'sha256':initial['working_memory']['persistence_sha256'],'historical_only':True,'current_observation_bound':False})
     messages=[{'role':'system','content':instructions},{'role':'user','content':json.dumps(initial,ensure_ascii=False)}]
     cursor=0;lastobs=None;started=time.monotonic();status='budget_ended';template_seen=False;guard_context={}
     for step in range(job.get('remaining_decisions',64)):
@@ -48,6 +54,7 @@ def run_job(args,client,job):
         inbox=client.call({'op':'tool',**base,'name':'read_peer_events','arguments':{'after_sequence':cursor},'request_id':request_prefix+':inbox:'+str(step)})
         if inbox.get('ok') and inbox['result']['messages']:
             rows=inbox['result']['messages'];cursor=inbox['result']['cursor']
+            if memory:memory.record_peer(rows,activation)
             source=next((m for m in rows if m['message_id']==(job.get('activation_source') or {}).get('source_message_id')),None)
             if source:
                 initial['new_event_task']={'source_message_id':source['message_id'],'message_kind':source['kind'],'sender':source['sender'],'responsibility':{'resource_request':'评估并回应对端提出的本端资源请求；本端资源由你自行主动观测并决定发布或说明无法回应。','resource_snapshot':'处理实际到达的对端资源回执，结合本端观测自主决定后续协作。','plan_proposed':'审议对端实际提出的当前方案，自主接受准备或拒绝。'}.get(source['kind'],'处理新的对端协议事件，核对本端职责后自主决定动作。'),'prior_runtime_end_is_not_completion':True}
@@ -56,7 +63,7 @@ def run_job(args,client,job):
             messages.append({'role':'user','content':json.dumps({'peer_events':rows},ensure_ascii=False)})
         # Retain original goal plus a bounded recent history; full raw calls remain on disk.
         context=client.call({'op':'runtime_state',**base,'observation_id':lastobs}) if structured else client.call({'op':'local_context',**base})
-        catalog=structured_catalog(context) if structured else CAT
+        catalog=stable_catalog() if structured else CAT
         if structured:provider.config['tool_descriptions']={name:value[0] for name,value in catalog.items()}
         model_messages=model_history(messages)+[{'role':'user','content':json.dumps({'protocol_context':context},ensure_ascii=False)}]
         answer=provider.call('edge',model_messages,{k:v[1] for k,v in catalog.items()},ev)
@@ -83,7 +90,7 @@ def run_job(args,client,job):
         if action in ('read_peer_events','wait_peer_event','wait_for_collaboration') and 'after_sequence' not in arguments:arguments['after_sequence']=cursor
         ev.add('framework_identity_binding',node,{'model_arguments':value['arguments'],'effective_arguments':arguments,'business_values_rewritten':False})
         rid=request_prefix+':decision:'+str(step)
-        if argument_error:result={'ok':False,'error_code':'INVALID_ARGUMENTS','error':argument_error}
+        if argument_error:result={'ok':False,'error_code':'INVALID_ARGUMENTS','error':argument_error,'public_argument_schema':catalog[action][1]}
         elif action=='retrieve_knowledge':result={'ok':True,'result':library.search(arguments['query'])}
         elif action=='get_report_template':
             template_seen=True;result={'ok':True,'result':json.loads((args.root/'vendor/templates/capability_gap_report.json').read_text(encoding='utf-8-sig'))}
@@ -95,12 +102,15 @@ def run_job(args,client,job):
             if action=='wait_peer_event':time.sleep(10)
             result=client.call({'op':'tool',**base,'name':action,'arguments':arguments,'request_id':rid})
         guard.outcome(key,result.get('ok',False));ev.add('node_tool_result',node,{'action':action,'arguments':arguments,'request_id':rid,'response':result})
+        if memory:memory.record_tool(action,value['arguments'],arguments,result,rid,activation)
         wake_rows=[]
         if action=='wait_for_collaboration' and result.get('ok'):
             state=await_peer(client,base,cursor,answer['call_id'],min(180,max(0,job.get('remaining_seconds',3600)-(time.monotonic()-started))),register=False)
             result['wait_outcome']=state
+            if memory:memory.record_tool(action,value['arguments'],arguments,result,rid,activation)
             if state['state']=='ready':
                 cursor=state['cursor'];wake_rows=state['messages']
+                if memory:memory.record_peer(wake_rows,activation)
                 ev.add('peer_messages_delivered_to_model',node,{'message_ids':[x['message_id'] for x in state['messages']],'messages':state['messages'],'source':'explicit_wait'})
             else:status='wait_'+state['state'];ev.add('explicit_wait_runtime_end',node,state);break
         if action=='read_sensor_adapter' and result.get('ok'):
@@ -117,6 +127,7 @@ def run_job(args,client,job):
     if status not in ('solved','unresolved','needs_resources'):
         client.call({'op':'runtime_end',**base,'reason':status})
         ledger.transition('unresolved',{'runtime_status':status,'model_submission':None})
+    if memory:memory.record_outcome(status,activation)
     write_json(folder/'result.json',{'status':status,'elapsed_seconds':time.monotonic()-started,'model_calls':provider.counter,'node_id':node})
 
 def main():

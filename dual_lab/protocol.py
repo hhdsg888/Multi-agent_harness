@@ -100,7 +100,9 @@ class StructuredProtocol:
         if self.c['partition'] and name in ('offer_group_plan','revise_group_plan','review_group_plan','execute_group_plan','read_group_plan','publish_resource_snapshot','request_peer_resources'):
             raise Fault('PEER_UNAVAILABLE','node message channel unavailable')
         state=self.state(arg.get('observation_id'))
-        require(name in state['available_tools'] or name=='read_peer_events','ACTION_PRECONDITION','tool unavailable in current protocol phase')
+        if name not in state['available_tools'] and name!='read_peer_events':
+            return {'ok':False,'error_code':'ACTION_PRECONDITION','error':'tool unavailable in current protocol phase; no action executed',
+                    'protocol_preconditions':{key:copy.deepcopy(state[key]) for key in ('phase','available_tools','local_observation_valid','pending_resource_request_ids','outgoing_resource_request_ids','allowed_wait_targets')}}
         if name in ('revise_group_plan','review_group_plan','execute_group_plan','read_group_plan'):
             plan=self.active();require(plan and arg.get('plan_id')==plan['plan_id'] and arg.get('expected_plan_hash')==plan['plan_hash'],'STALE_NEGOTIATION_VIEW','current plan changed after the model input; no automatic retargeting')
         if name=='request_peer_resources':return {'ok':True,'result':self.p.peer(self.c,self.n,'resource_request',{'reason':arg.get('reason','')})}
