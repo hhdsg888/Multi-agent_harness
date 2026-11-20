@@ -1,6 +1,7 @@
 import copy,hashlib,json,sqlite3,threading,time,uuid
 from pathlib import Path
 from .feasibility import link_options
+from .policy import flexible,window_seconds,decision_limit,budget_open
 
 def clone(x):return copy.deepcopy(x)
 def sha(x):return hashlib.sha256(json.dumps(x,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
@@ -34,7 +35,8 @@ class Plant:
         require(protocol_mode in ('legacy','structured'),'INVALID_POLICY','unknown protocol mode')
         require(type(event_reactivation) is bool,'INVALID_POLICY','event reactivation must be boolean')
         require(type(task_dispatch) is bool and (not task_dispatch or protocol_mode=='structured'),'INVALID_POLICY','task dispatch requires structured protocol')
-        require(task_revision in ('r11','r12','r13','r14'),'INVALID_POLICY','unknown task revision')
+        require(task_revision in ('r11','r12','r13','r14','r15'),'INVALID_POLICY','unknown task revision')
+        require(task_revision!='r15' or task_dispatch,'INVALID_POLICY','r15 requires task dispatch bookkeeping')
         if self.state['active']:
             prior=self.case(self.state['active']);require(self.case_complete(prior),'ACTIVE_CASE','previous case still active or has deliverable follow-up work')
         cid='group_'+uuid.uuid4().hex[:12]
@@ -78,12 +80,12 @@ class Plant:
         c['messages'].append(message);self.event('message_sent',n,message)
         if kind in ('plan_proposed','plan_response','plan_prepared','plan_prepare_failed','plan_authorized','execution_receipt','resource_snapshot','resource_request','collaboration_request'):self.activate_for_message(c,message['recipient'],message['message_id'])
         return clone(message)
-    def improved_tasks(self,c):return c.get('task_dispatch') and c.get('task_revision') in ('r12','r13','r14')
+    def improved_tasks(self,c):return c.get('task_dispatch') and c.get('task_revision') in ('r12','r13','r14','r15')
     def pending_activation(self,c,node):
         if not self.improved_tasks(c) or c.get('forced_closed') or c['partition'] or not c.get('event_reactivation'):return None
         finished=c['finished'][node]
         if not finished or not ('model_submission' in finished or finished.get('runtime_status') in ('model_no_action','wait_deadlock','wait_timeout','subtask_repeated_error')):return None
-        if c['decisions'][node]>=64 or time.time()-c['created']>=3600:return None
+        if not budget_open(c,node):return None
         claimed=set(c.get('activation_message_ids',{}).get(node,[]))
         return next((m for m in self.unread_control_messages(c,node) if m['message_id'] not in claimed),None)
     def case_complete(self,c):
@@ -94,7 +96,7 @@ class Plant:
         if self.improved_tasks(c) and (not on_job_poll or c['partition'] or c.get('forced_closed')):return
         finished=c['finished'][target]
         recoverable=finished and c.get('event_reactivation') and finished.get('runtime_status') in (('model_no_action','wait_deadlock','wait_timeout','subtask_repeated_error') if self.improved_tasks(c) else ('model_no_action','wait_deadlock','wait_timeout'))
-        if finished and ('model_submission' in finished or recoverable) and c['decisions'][target]<64 and time.time()-c['created']<3600:
+        if finished and ('model_submission' in finished or recoverable) and budget_open(c,target):
             source=next((m for m in c['messages'] if m['message_id']==message_id and m['recipient']==target and m['kind']!='agent_message'),None)
             if c.get('event_reactivation'):
                 claimed=c.setdefault('activation_message_ids',{'A':[],'B':[]})[target]
@@ -300,7 +302,7 @@ class Plant:
         with self.lock:
             op=data.get('op')
             if actor=='admin':
-                if op=='capabilities':return {'task_dispatch_revision':'r11','task_dispatch_revisions':['r11','r12','r13','r14'],'stable_public_tools':17,'task_context_binding':True,'post_execution_barrier':True}
+                if op=='capabilities':return {'task_dispatch_revision':'r11','task_dispatch_revisions':['r11','r12','r13','r14','r15'],'stable_public_tools':17,'task_context_binding':True,'post_execution_barrier':True,'r15':{'multi_tool_calls':True,'window_seconds':1800,'decision_limit':None,'task_cards':'advisory','local_commands':True}}
                 if op=='begin_suite':
                     if self.state['active']:require(self.case_complete(self.case(self.state['active'])),'ACTIVE_CASE','previous suite still has live nodes or deliverable follow-up work')
                     self.state.update(suite_done=False,active=None,suite_name=data['name']);self.save();return {'started':data['name']}
@@ -338,6 +340,7 @@ class Plant:
                 if c.get('protocol_mode')=='structured':goal={**goal,'observation_window_per_node':1,'completion_semantics':'solved means verified minimum service floor; desired quality and protocol completion are separate','voice_satisfaction_definition':'voice_delivered_mbps / voice_demand_mbps'}
                 source=c.get('activation_sources',{}).get(actor)
                 job={'group_task_id':cid,'node_id':actor,'goal':goal,'cloud_available':False,'protocol_mode':c.get('protocol_mode','legacy'),'task_dispatch':c.get('task_dispatch',False),'task_revision':c.get('task_revision','r11'),'activation':c.get('activations',{}).get(actor,1),'activation_source':{'source_message_id':source['source_message_id']} if source else None,'remaining_decisions':64-c.get('decisions',{}).get(actor,0),'remaining_seconds':max(0,3600-(time.time()-c['created']))}
+                if flexible(c):job.update(remaining_decisions=None,remaining_seconds=max(0,1800-(time.time()-c['created'])))
                 inbox=c.get('activation_inboxes',{}).get(actor)
                 if self.improved_tasks(c) and inbox and inbox['activation']==job['activation']:job['activation_inbox']=clone(inbox)
                 return {'job':job}
@@ -362,7 +365,7 @@ class Plant:
                 task=state['current_task'];require(task['state']=='waiting','WAIT_DEPENDENCY_REQUIRED','scheduler only waits on a real pending dependency')
                 require(data['after_sequence']>=c['delivered'][actor],'STALE_CURSOR','do not replay previously delivered messages')
                 seconds=data.get('seconds',180);require(type(seconds) in (int,float) and 0<seconds<=180,'INVALID_ARGUMENTS','wait interval must be within 180 seconds')
-                c.setdefault('waiting',{'A':None,'B':None})[actor]={'after_sequence':data['after_sequence'],'awaited':task['wait_target'],'scheduler_task_id':task['task_id'],'deadline':min(time.time()+seconds,c['created']+3600)}
+                c.setdefault('waiting',{'A':None,'B':None})[actor]={'after_sequence':data['after_sequence'],'awaited':task['wait_target'],'scheduler_task_id':task['task_id'],'deadline':min(time.time()+seconds,c['created']+window_seconds(c))}
                 self.event('scheduler_wait_registered',actor,{'case_id':c['id'],**c['waiting'][actor]});self.save()
                 return {'state':'waiting','task_id':task['task_id']}
             if op in ('idle','idle_poll'):
@@ -394,6 +397,8 @@ class Plant:
                     state='deadlock' if quiet else 'timeout';intent=waiting[actor];waiting[actor]=None
                     TaskGraph(self,c,actor).wait_result(intent['scheduler_task_id'],state)
                     self.save();return {'state':state,'task_id':intent['scheduler_task_id'],'channel_available':not c['partition']}
+                if flexible(c) and (quiet or time.time()>=waiting[actor].get('deadline',c['created']+1800)):
+                    waiting[actor]=None;self.save();return {'state':'deadlock' if quiet else 'timeout','channel_available':not c['partition']}
                 self.save();return {'state':terminal if quiet else 'waiting','channel_available':not c['partition']}
             if op=='trace':
                 c['decisions'][actor]+=1
@@ -410,6 +415,16 @@ class Plant:
                 self.save();return {'ended':True}
             if op=='request_status':
                 row=self.db.execute('SELECT result FROM requests WHERE id=?',(actor+':'+data['request_id'],)).fetchone();return {'status':'complete' if row else 'unknown','result':json.loads(row[0]) if row else None}
+            if op=='local_tool_receipt':
+                require(flexible(c),'INVALID_POLICY','local host tools require r15')
+                rid=actor+':'+data['request_id'];fp=sha({'case_id':c['id'],'name':data['name'],'arguments':data.get('arguments'),'host_tool':True})
+                prior=self.db.execute('SELECT fp,result FROM requests WHERE id=?',(rid,)).fetchone()
+                if prior:
+                    require(prior[0]==fp,'REQUEST_ID_CONFLICT','different host command used the same request identity')
+                    return {'recorded':True}
+                self.db.execute('INSERT INTO requests VALUES(?,?,?)',(rid,fp,json.dumps(data['response'])))
+                self.event('local_host_tool_result',actor,{'case_id':c['id'],'request_id':data['request_id'],'action':data['name'],'response':data['response'],'source':'node reported host receipt; not a simulated network execution receipt'})
+                self.save();return {'recorded':True}
             require(op=='tool','UNKNOWN_OPERATION',str(op));require(not c['finished'][actor],'TASK_ENDED','local task already ended')
             rid=actor+':'+data['request_id'];identity={k:data[k] for k in ('case_id','boot_id','name','arguments')}
             if c.get('task_dispatch'):identity.update(task_context_token=data.get('task_context_token'),model_arguments=data.get('model_arguments'))
@@ -417,6 +432,10 @@ class Plant:
             row=self.db.execute('SELECT fp,result FROM requests WHERE id=?',(rid,)).fetchone()
             if row:
                 require(row[0]==fp,'REQUEST_ID_CONFLICT','same request_id with different operation');return json.loads(row[1])
+            if flexible(c) and not budget_open(c,actor):
+                result={'ok':False,'error_code':'SCENARIO_DEADLINE','error':'shared 1800-second scenario window ended; no new action executed'}
+                self.event('tool_result',actor,{'case_id':c['id'],'request_id':data['request_id'],'action':data['name'],'arguments':data['arguments'],'response':result})
+                self.db.execute('INSERT INTO requests VALUES(?,?,?)',(rid,fp,json.dumps(result)));self.save();return result
             require('node_id' not in data['arguments'] or data['arguments']['node_id']==actor,'FORBIDDEN','cannot address another node executor')
             try:
                 if c.get('protocol_mode')=='structured':
@@ -443,7 +462,12 @@ class Plant:
         full=[p['plan_id'] for p in c['plans'].values() if set(p['applied'])=={'A','B'}]
         local_writes=sum(json.loads(row[0]).get('case_id')==c['id'] for row in self.db.execute("SELECT body FROM events WHERE kind='local_execute'"))
         model_turns={n:sum(json.loads(row[0]).get('case_id')==c['id'] for row in self.db.execute("SELECT body FROM events WHERE kind='model_turn' AND actor=?",(n,))) for n in ('A','B')}
-        return {'case_id':c['id'],'fixture':c['fixture'],'measurements':m,'business_target_met':solved,'full_dual_plan_ids':full,
+        timing={}
+        if flexible(c):
+            elapsed={n:(result['finished_at']-c['created'] if result and 'model_submission' in result else None) for n,result in c['finished'].items()}
+            timing={'scenario_window_seconds':1800,'node_completion_elapsed_seconds':elapsed,
+                    'flow_completed_within_window':all(value is not None and 0<=value<1800 for value in elapsed.values())}
+        return {**timing,'case_id':c['id'],'fixture':c['fixture'],'measurements':m,'business_target_met':solved,'full_dual_plan_ids':full,
                 'dual_execution_observed':bool(full),'messages_sent':len(c['messages']),'node_results':clone(c['finished']),
                 'model_turns':model_turns,'model_findings':clone(c['findings']),'local_rate_writes':local_writes,
                 'node_task_history':clone(c.get('node_history',{})),'node_activations':clone(c.get('activations',{})),

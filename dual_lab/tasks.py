@@ -6,6 +6,7 @@ not enter this module. The graph is persisted inside the plant's SQLite state.
 """
 import copy,time
 from .core import require,sha
+from .policy import flexible,window_seconds,decision_limit
 
 TERMINAL={'completed','failed','superseded','closed_by_model_exit'}
 REPEAT_LIMIT=3
@@ -80,8 +81,8 @@ class TaskGraph:
                      'activation':activation,'plan_id':pid,'plan_revision':plan.get('plan_revision') if plan else None,
                      'depends_on':[d for d in deps if d],'state':'ready','created_at':time.time(),
                      'source_message_ids':source_ids,'completion_receipt_ids':[],
-                     'attempt_budget':{'same_action_error_limit':REPEAT_LIMIT,'global_decisions':64},
-                     'deadline':self.c['created']+3600,'failures':{},'wait_target':waiting}
+                     'attempt_budget':{'same_action_error_limit':None if flexible(self.c) else REPEAT_LIMIT,'global_decisions':decision_limit(self.c)},
+                     'deadline':self.c['created']+window_seconds(self.c),'failures':{},'wait_target':waiting}
                 self.d['tasks'][ident]=row;self.event('subtask_created',{k:row[k] for k in ('task_id','task_type','depends_on','activation')})
             if complete:self.complete(row,*complete)
             if row['state'] not in TERMINAL:
@@ -156,7 +157,7 @@ class TaskGraph:
         card=self.card(current,state) if current else None
         self.p.save()
         return {'current_task':card,'context_revision':self.d['context_revision'],'context_token':digest,
-                'execution_barrier':visible_barrier,'shared_budget':{'remaining_decisions':max(0,64-self.c['decisions'][self.n]),'deadline':self.c['created']+3600},
+                'execution_barrier':visible_barrier,'shared_budget':{'remaining_decisions':None if flexible(self.c) else max(0,64-self.c['decisions'][self.n]),'deadline':self.c['created']+window_seconds(self.c)},
                 'summary':self.summary()}
     def card(self,row,state=None):
         card=copy.deepcopy(row);description,tools=TASKS[row['task_type']]
@@ -212,7 +213,7 @@ class TaskGraph:
         else:
             current['last_error']={'request_id':request_id,'action':action,'error_code':result.get('error_code')}
             key=sha([action,args,result.get('error_code')]);current['failures'][key]=current['failures'].get(key,0)+1
-            if current['failures'][key]>=REPEAT_LIMIT:
+            if not flexible(self.c) and current['failures'][key]>=REPEAT_LIMIT:
                 current.update(state='failed',failure_reason='repeated_action_error',last_error_code=result.get('error_code'))
                 self.event('subtask_failed',{'task_id':current['task_id'],'reason':'repeated_action_error','action':action,'error_code':result.get('error_code')})
     def end(self,reason):

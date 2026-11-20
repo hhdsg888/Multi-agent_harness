@@ -39,6 +39,9 @@ def await_task(client,base,cursor,context,observation_id,seconds=180,sleep=time.
     return state
 
 def run_job(args,client,job):
+    if job.get('task_revision')=='r15':
+        from .flexible import run_flexible_job
+        return run_flexible_job(args,client,job)
     cid=job['group_task_id'];node=args.node;boot=args.boot
     folder=args.root/'runs'/cid/node
     if job.get('activation',1)>1:folder=folder/('activation_'+str(job['activation']))

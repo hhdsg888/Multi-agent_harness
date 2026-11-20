@@ -1,6 +1,6 @@
 # Multi-agent harness
 
-当前版本：r14。面向通信现场的中心协调与端侧多智能体协同架构。
+当前版本：r15。面向通信现场的中心协调与端侧多智能体协同架构。
 
 A兼任中心协调和本端处置，B独立观察、审议并执行本端配置。当前通信现场由仿真执行服务承载；模型推理通过Ollama接口完成。
 
@@ -38,7 +38,7 @@ from dual_lab.client import Client
 
 auth = json.loads(Path("auth.local.json").read_text())
 client = Client("http://127.0.0.1:18933", auth["admin"])
-job = client.call({'op': 'create', 'fixture': 'T00', 'change_policy': 'at_start', 'protocol_mode': 'structured', 'event_reactivation': True, 'task_dispatch': True, 'task_revision': 'r14'})
+job = client.call({'op': 'create', 'fixture': 'T00', 'change_policy': 'at_start', 'protocol_mode': 'structured', 'event_reactivation': True, 'task_dispatch': True, 'task_revision': 'r15'})
 print(job)
 ```
 
@@ -47,7 +47,7 @@ print(job)
 r1—r15按顺序保留同名标签。清理仓库范围时只移除了非架构材料，各版本保留的运行源码与清理前逐字节一致。r13原本是依据留存材料恢复的版本，这一来源限制仍保留。
 
 ```sh
-git switch --detach r14
+git switch --detach r15
 ```
 
 新旧提交哈希见主分支`HISTORY_MAP.json`。既有实验原始记录不改写，可据映射定位相同核心源码。后续只提交架构改动，不上传开发操作脚本或制作本地历史源码副本。

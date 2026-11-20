@@ -2,6 +2,7 @@
 import copy,time,uuid
 from .core import Fault,require,GOAL,sha
 from .feasibility import link_options
+from .policy import flexible
 
 class StructuredProtocol:
     def __init__(self,plant,case,node):self.p=plant;self.c=case;self.n=node;self.peer='B' if node=='A' else 'A'
@@ -54,12 +55,24 @@ class StructuredProtocol:
         observation=self.fresh_observation(ident);plan=self.active();available=['read_sensor_adapter','retrieve_knowledge','get_report_template','report_gap']
         owed=self.pending_requests();outgoing=self.outgoing_requests();published=self.own_resources_published(observation)
         wait_options=self.wait_options(observation,plan,owed,published,outgoing)
+        if flexible(self.c):
+            wait_options=[]
+            if not self.c['partition']:
+                if outgoing:wait_options.append('peer_resources')
+                if not plan and self.n=='B' and published:wait_options.append('plan_update')
+                elif plan and not plan['authorized']:
+                    if self.n=='A' and plan['accepted'].get('B') is None:wait_options.append('plan_update')
+                    elif self.n=='B' and plan['accepted'].get('B') is True:wait_options.append('authorization')
+                elif plan and self.n in plan['applied'] and self.peer not in plan['applied']:wait_options.append('execution_receipt')
         peer_observation=None
         try:peer_observation=self.peer_observation()
         except Fault:pass
         resource_available=peer_observation is not None
         channel_available=not self.c['partition']
-        if channel_available:available.append('send_peer_message')
+        if channel_available:
+            available.append('send_peer_message')
+            if flexible(self.c):available.append('request_peer_resources')
+        if flexible(self.c):available.append('read_local_commitments')
         if wait_options:available.append('wait_for_collaboration')
         # Shared protocol records can be synchronized over the working channel;
         # partitioned nodes receive only their previously known local ledger.
@@ -74,8 +87,8 @@ class StructuredProtocol:
             available+=['finish','record_finding','calculate_link_options']
             if channel_available:
                 available.append('publish_resource_snapshot')
-                if not owed and not outgoing:available.append('request_peer_resources')
-            if not plan or set(plan['applied'])=={'A','B'}:available.append('configure_local_rate')
+                if not flexible(self.c) and not owed and not outgoing:available.append('request_peer_resources')
+            if flexible(self.c) or not plan or set(plan['applied'])=={'A','B'}:available.append('configure_local_rate')
             if channel_available:
                 if self.n=='A' and resource_available:
                     if not plan or set(plan['applied'])=={'A','B'}:available.append('offer_group_plan')
@@ -91,8 +104,9 @@ class StructuredProtocol:
                               'common_plan_owner':'A','peer_can_create_common_plan':self.n=='B'},
                 'current_plan_id':plan['plan_id'] if public else None,'current_plan_hash':plan['plan_hash'] if public else None,'current_plan':public,
                 'local_ledger':self.p.local_context(self.c,self.n),'channel_available':channel_available}
+        if flexible(self.c):view['remaining_seconds']=max(0,self.c['created']+1800-time.time())
         if self.c.get('task_dispatch'):
-            if (self.c.get('task_revision')=='r14' and observation and peer_observation
+            if (self.c.get('task_revision') in ('r14','r15') and observation and peer_observation
                     and ('offer_group_plan' in available or 'revise_group_plan' in available)):
                 view['plan_calculation_sources'] = {self.n: observation['observation_id'],
                                                     self.peer: peer_observation['observation_id']}
@@ -118,8 +132,12 @@ class StructuredProtocol:
             from .catalog import task_catalog
             from .validation import validate
             state=self.state(arg.get('observation_id'));graph=TaskGraph(self.p,self.c,self.n)
-            graph.check(task_context_token)
-            catalog=task_catalog();require(name in catalog,'UNKNOWN_TOOL','tool outside stable public contract')
+            if not flexible(self.c):graph.check(task_context_token)
+            if flexible(self.c):
+                from .flexible import flexible_catalog
+                catalog=flexible_catalog(self.n)
+            else:catalog=task_catalog()
+            require(name in catalog,'UNKNOWN_TOOL','tool outside public node contract')
             error=validate(model_arguments if model_arguments is not None else arg,catalog[name][1])
             if error:return {'ok':False,'error_code':'INVALID_ARGUMENTS','error':error,'public_argument_schema':catalog[name][1]}
             if model_arguments is not None:
@@ -133,7 +151,7 @@ class StructuredProtocol:
         if self.c['partition'] and name in ('offer_group_plan','revise_group_plan','review_group_plan','execute_group_plan','read_group_plan','publish_resource_snapshot','request_peer_resources'):
             raise Fault('PEER_UNAVAILABLE','node message channel unavailable')
         state=self.state(arg.get('observation_id'))
-        if name not in state['available_tools'] and name!='read_peer_events':
+        if name not in state['available_tools'] and name!='read_peer_events' and not (flexible(self.c) and name=='read_local_commitments'):
             return {'ok':False,'error_code':'ACTION_PRECONDITION','error':'tool unavailable in current protocol phase; no action executed',
                     'protocol_preconditions':{key:copy.deepcopy(state[key]) for key in ('phase','available_tools','local_observation_valid','pending_resource_request_ids','outgoing_resource_request_ids','allowed_wait_targets')}}
         if name in ('revise_group_plan','review_group_plan','execute_group_plan','read_group_plan'):
@@ -152,6 +170,7 @@ class StructuredProtocol:
         if name=='wait_for_collaboration':
             require(arg['awaited'] in state['allowed_wait_targets'],'WAIT_DEPENDENCY_REQUIRED','wait target must be a real outstanding peer responsibility; local observation and owed resource replies come first')
             self.c.setdefault('waiting',{'A':None,'B':None})[self.n]={'after_sequence':arg['after_sequence'],'awaited':arg['awaited'],'plan_id':self.c.get('active_plan_id')}
+            if flexible(self.c):self.c['waiting'][self.n]['deadline']=min(time.time()+180,self.c['created']+1800)
             self.p.event('explicit_wait_requested',self.n,{'case_id':self.c['id'],**self.c['waiting'][self.n]})
             return {'ok':True,'result':{'wait_registered':True,'awaited':arg['awaited']}}
         if name=='execute_group_plan':return self.p.semantic_tool(self.c,self.n,name,arg)
