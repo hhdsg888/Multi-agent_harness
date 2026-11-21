@@ -94,5 +94,11 @@
     "base_runtime_tag": "r15",
     "runtime_tag": "r16",
     "origin": "receipt attribution and explicit task-closure implementation; historical runtime tags unchanged"
+  },
+  {
+    "revision": "r17",
+    "base_runtime_tag": "r16",
+    "runtime_tag": "r17",
+    "origin": "explicit action submission and current-activation closure identity; archived native revisions preserved"
   }
 ]

@@ -1,6 +1,6 @@
 # Multi-agent harness
 
-当前版本：r16。面向通信现场的中心协调与端侧多智能体协同架构。
+当前版本：r17。面向通信现场的中心协调与端侧多智能体协同架构。
 
 A兼任中心协调和本端处置，B独立观察、审议并执行本端配置。当前通信现场由仿真执行服务承载；模型推理通过Ollama接口完成。
 
@@ -20,6 +20,8 @@ A兼任中心协调和本端处置，B独立观察、审议并执行本端配置
 r16将倒计时与稳定任务身份分开，按原请求上下文保存实际工具回执。上下文变化不丢弃回执，也不把旧回执算到无关的新任务上。
 
 本端明确退出会向可达对端发送事实通知，保留未执行承诺；通知不会被当作执行回执，也不会单独反复激活已结束的任务。未解决或资源不足结案可以如实报告观测缺失、过期；solved仍要求有效观测、已接受的本端执行，以及适用时双方执行确认后的复采。
+
+r17使用结构化动作数组提交模型决定，例如 `{"actions":[{"action":"read_sensor_adapter","arguments":{}}]}`。数组允许多个动作，工具名和参数契约保持不变；不能继续时由模型明确提交finish及其选择的状态。每轮突出当前激活的真实结案接收状态，历史solved不代表当前任务结束。正文和thinking不被提取成动作，格式错误返回事实回执。旧r15/r16继续使用原生工具提交。
 
 ## 基本运行
 
@@ -46,13 +48,13 @@ from dual_lab.client import Client
 
 auth = json.loads(Path("auth.local.json").read_text())
 client = Client("http://127.0.0.1:18933", auth["admin"])
-job = client.call({'op': 'create', 'fixture': 'T00', 'change_policy': 'at_start', 'protocol_mode': 'structured', 'event_reactivation': True, 'task_dispatch': True, 'task_revision': 'r16'})
+job = client.call({'op': 'create', 'fixture': 'T00', 'change_policy': 'at_start', 'protocol_mode': 'structured', 'event_reactivation': True, 'task_dispatch': True, 'task_revision': 'r17'})
 print(job)
 ```
 
 ## 版本回滚
 
-r1—r16按顺序保留同名标签。历史范围清理仅移除了非架构材料，r1—r15保留的运行源码与清理前逐字节一致。r13原本是依据留存材料恢复的版本，这一来源限制仍保留。
+r1—r17按顺序保留同名标签。历史范围清理仅移除了非架构材料，r1—r15保留的运行源码与清理前逐字节一致。r13原本是依据留存材料恢复的版本，这一来源限制仍保留。
 
 ```sh
 git switch --detach r15

@@ -1,5 +1,5 @@
-"""Native Ollama calls; no text extraction, JSON grammar or action repair."""
-import copy,json,time,urllib.request
+"""Archived native calls and r17 explicit batches; no prose extraction or action repair."""
+import copy,hashlib,json,time,urllib.request
 from collab_lab import providers as transport
 from collab_lab.common import dumps,write_json
 
@@ -36,9 +36,15 @@ class NodeProviders(transport.Providers):
               'tools':[{'type':'function','function':{'name':name,'description':self.config.get('tool_descriptions',{}).get(name,CAT.get(name,('Local tool',))[0]),'parameters':schema}} for name,schema in actions.items()],
               'stream':False,'think':self.config.get('edge_thinking',True),
               'options':{'temperature':0,'num_ctx':self.config['edge_context'],'num_predict':output_tokens}}
+        structured=self.config.get('action_submission')=='structured_batch'
+        if structured:
+            from .submission import batch_schema,structured_messages
+            body.pop('tools')
+            body['format']=batch_schema(actions)
+            body['messages']=structured_messages(messages,actions,self.config.get('tool_descriptions',{}))
         base=evidence.directory/'calls'/role/ident
         write_json(str(base)+'_request.json',body)
-        evidence.add('model_request',role,{'call_id':ident,'model':connection['model'],'actions':list(actions),'attempt':attempt,'retry_of':retry_of,'output_limit':output_tokens,'transport':'native_tools'})
+        evidence.add('model_request',role,{'call_id':ident,'model':connection['model'],'actions':list(actions),'attempt':attempt,'retry_of':retry_of,'output_limit':output_tokens,'transport':'structured_batch' if structured else 'native_tools'})
         started=time.monotonic();raw=None
         try:
             request=urllib.request.Request(connection['base_url'].rstrip('/')+'/api/chat',data=dumps(body).encode(),headers=headers)
@@ -47,11 +53,19 @@ class NodeProviders(transport.Providers):
                 timeout=min(timeout,self.config['absolute_deadline_monotonic']-time.monotonic())
                 if timeout<=0:raise TimeoutError('shared scenario deadline reached before model request')
             with opener.open(request,timeout=timeout) as response:raw=json.load(response)
-            parsed=parse_native(raw,actions,ident,allow_idle=True,allow_multiple=self.config.get('native_multi_call',False))
+            delivery_error=None
+            if structured:
+                from .submission import parse_batch
+                if not raw.get('done') or raw.get('done_reason')=='length':
+                    raise transport.IncompleteResponseError('Structured action response incomplete',raw.get('done_reason'),ident)
+                parsed,delivery_error=parse_batch(raw,actions)
+            else:parsed=parse_native(raw,actions,ident,allow_idle=True,allow_multiple=self.config.get('native_multi_call',False))
             result={'parsed':parsed,'control':self.config.get('native_no_call_control','idle') if parsed is None else 'tool_call','content':raw['message'].get('content',''),'assistant_message':raw['message'],
                     'raw':raw,'model':connection['model'],'call_id':ident,'seconds':time.monotonic()-started,
                     'finish_reason':raw.get('done_reason'),'attempt':attempt,'retry_of':retry_of,
                     'usage':{'prompt_tokens':raw.get('prompt_eval_count'),'output_tokens':raw.get('eval_count')}}
+            if structured:result.update(submission_transport='structured_batch',delivery_error=delivery_error,
+                input_messages_sha256=hashlib.sha256(json.dumps(body['messages'],sort_keys=True,ensure_ascii=False).encode()).hexdigest())
             write_json(str(base)+'_response.json',result)
             evidence.add('model_response',role,{k:result[k] for k in ('call_id','model','seconds','parsed','finish_reason','usage','attempt','retry_of')})
             return result

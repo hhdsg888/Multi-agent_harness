@@ -126,7 +126,7 @@ class StructuredProtocol:
                 available.remove('wait_for_collaboration')
                 if wait_options:available.append('wait_for_collaboration')
         if self.c.get('task_dispatch'):
-            if (self.c.get('task_revision') in ('r14','r15','r16') and observation and peer_observation
+            if (self.c.get('task_revision') in ('r14','r15','r16','r17') and observation and peer_observation
                     and ('offer_group_plan' in available or 'revise_group_plan' in available)):
                 view['plan_calculation_sources'] = {self.n: observation['observation_id'],
                                                     self.peer: peer_observation['observation_id']}

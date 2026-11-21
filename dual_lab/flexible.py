@@ -22,7 +22,7 @@ from collab_lab.rag import RagLibrary
 from .adapter import NodeProviders
 from .catalog import CAT, EXECUTION_DESCRIPTION, current_measured_plan_options, obj, S, task_catalog
 from .memory import WorkingMemory
-from .policy import receipt_safe
+from .policy import receipt_safe,structured_submission
 from .validation import model_history, validate
 
 SYSTEM_R15 = '''你是通信现场的自主智能体。A兼任中心协调者，维护共同方案；B可主动提出建议、独立接受或拒绝；双方分别执行自己的配置。
@@ -169,6 +169,7 @@ def run_flexible_job(args, client, job):
               'request_timeout_seconds': 180, 'response_retry_attempts': 1,
               'transport_retry_attempts': 1, 'native_multi_call': True,
               'absolute_deadline_monotonic': deadline}
+    if structured_submission(job):config['action_submission']='structured_batch'
     provider = NodeProviders(config)
     library = RagLibrary(args.root / 'vendor/knowledge', strategy_pack=args.root / 'vendor/strategies')
     memory = WorkingMemory(args.root / 'runs' / cid / node / 'working_memory.json', cid, node)
@@ -212,6 +213,10 @@ def run_flexible_job(args, client, job):
         deadline = min(deadline, time.monotonic() + context.get('remaining_seconds', remaining()))
         packet = {'protocol_context': {k: v for k, v in context.items() if k != 'plan_calculation_sources'},
                   'task_card_is_advisory': True, 'remaining_seconds': remaining()}
+        if structured_submission(job):
+            packet['current_submission_receipt']={'group_task_id':cid,'node_id':node,'activation':activation,
+                'current_activation_finish_received':context['task_dispatch']['summary']['explicit_model_submission'] is not None,
+                'historical_finishes_do_not_close_current_activation':True}
         measured = current_measured_plan_options(context.get('plan_calculation_sources'), group_calculation)
         if measured is not None:
             packet['observed_common_plan_options'] = measured
@@ -226,9 +231,10 @@ def run_flexible_job(args, client, job):
         actions = (answer['parsed'] or {}).get('actions', [])
         client.call({'op': 'trace', **base, 'call_id': answer['call_id'], 'action': 'batch' if actions else 'text_response',
                      'actions': [a.get('action') for a in actions], 'hostname': __import__('socket').gethostname(),
-                     'input_sha256': hashlib.sha256(json.dumps(model_messages, sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
+                     'input_sha256': answer.get('input_messages_sha256') or hashlib.sha256(json.dumps(model_messages, sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
                      'peer_message_ids': [m['message_id'] for row in model_messages if row['role'] == 'user' for m in json.loads(row['content']).get('peer_events', [])]})
-        messages.append(answer['assistant_message'])
+        if not structured_submission(job):messages.append(answer['assistant_message'])
+        elif actions:messages.append({'role':'assistant','content':answer.get('content',json.dumps({'actions':actions},ensure_ascii=False))})
         if remaining() <= 0 and not actions:
             break
         if not actions:
@@ -236,7 +242,9 @@ def run_flexible_job(args, client, job):
             if not guard.before('no_action', {}, {**progress_context(context), 'sample': sample_facts}):
                 status = 'no_progress_loop'
                 break
-            messages.append({'role': 'user', 'content': json.dumps({'runtime_receipt': {'tool_calls_received': 0, 'task_finished': False}})})
+            receipt={'tool_calls_received':0,'task_finished':False}
+            if structured_submission(job):receipt.update(submission_error=answer.get('delivery_error') or 'no valid action batch received',activation=activation)
+            messages.append({'role': 'user', 'content': json.dumps({'runtime_receipt':receipt})})
             step += 1
             continue
         # Bind the plan the model actually saw. Only an earlier successful
@@ -286,6 +294,7 @@ def run_flexible_job(args, client, job):
             tool_message = {'role': 'tool', 'tool_name': action or 'invalid_call', 'content': json.dumps({'request_id': rid, 'tool_result': result}, ensure_ascii=False)}
             if 'tool_call_id' in value:
                 tool_message['tool_call_id'] = value['tool_call_id']
+            if structured_submission(job):tool_message={'role':'user','content':json.dumps({'actual_tool_receipt':tool_message},ensure_ascii=False)}
             messages.append(tool_message)
             if result.get('ok'):
                 if action == 'read_sensor_adapter':
